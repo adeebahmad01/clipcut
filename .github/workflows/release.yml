@@ -25,9 +25,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Ubuntu 22.04 keeps the glibc requirement low (2.35) for older distros.
-          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
-          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
+          # ort's prebuilt ONNX Runtime calls glibc 2.38 functions, so build on
+          # the oldest Ubuntu that has them.
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-24.04 }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm }
           # ort has no prebuilt ONNX Runtime for Intel Macs, so only Apple silicon.
           - { target: aarch64-apple-darwin, os: macos-14 }
     steps:
@@ -40,13 +41,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      # ort's prebuilt ONNX Runtime needs GCC 14's libstdc++, newer than
-      # Ubuntu 22.04 ships. Link it statically with GCC 14 so the binary
-      # only needs glibc 2.35 at runtime.
+      # ort's prebuilt ONNX Runtime needs GCC 14's libstdc++. Link it
+      # statically so the binary runs on distros with an older one.
       - name: Linux toolchain
         if: runner.os == 'Linux'
         run: |
-          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+          sudo apt-get update
           sudo apt-get install -y --no-install-recommends gcc-14 g++-14
           mkdir -p "$RUNNER_TEMP/static-cxx"
           cp "$(g++-14 -print-file-name=libstdc++.a)" "$RUNNER_TEMP/static-cxx/"
