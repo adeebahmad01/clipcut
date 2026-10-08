@@ -568,7 +568,7 @@ assert not pathlib.Path("SKILL.md").exists(), "scanner runs outside skill root"
 strict = args and args[0] == "--strict"
 if strict:
     args = args[1:]
-assert all(pathlib.Path(p).parent == pathlib.Path.cwd() for p in args)
+assert all(pathlib.Path(p).resolve().parent == pathlib.Path.cwd().resolve() for p in args)
 original = pathlib.Path(args[0]).read_text()
 if name == "extract_constraints.py":
     report = {"constraints": []}
