@@ -22,9 +22,12 @@ The release is not notarized. Run
 `xattr -d com.apple.quarantine ~/.local/bin/clipcut` once. The installer
 does this for you.
 
-**Linux: `GLIBC_2.35 not found`.**
-The release binaries need glibc 2.35 or newer (Ubuntu 22.04+, Debian 12+).
-On older systems, [build from source](Installation.md#build-from-source).
+**Linux: `GLIBC_2.38 not found` (or 2.39).**
+The release binaries need glibc 2.39 or newer (Ubuntu 24.04+, Debian 13+,
+Fedora 40+). The ONNX Runtime used for the voice needs it, so building
+from source does not help. On an older system, run ClipCut inside an
+Ubuntu 24.04 container, for example with
+[Distrobox](https://distrobox.it/): `distrobox create -i ubuntu:24.04`.
 
 ## Claude Code
 

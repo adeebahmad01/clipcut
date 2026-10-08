@@ -62,8 +62,8 @@ If `~/.local/bin` is not on your `PATH`, the script says so. Add
    | Linux ARM64 (Raspberry Pi 5, Graviton…) | `clipcut-aarch64-unknown-linux-gnu.tar.gz` |
    | macOS Apple silicon (M1 and later) | `clipcut-aarch64-apple-darwin.tar.gz` |
 
-   Linux builds need glibc 2.35 or newer (Ubuntu 22.04, Debian 12,
-   Fedora 36 and later). Intel Macs are not supported yet: the ONNX
+   Linux builds need glibc 2.39 or newer (Ubuntu 24.04, Debian 13,
+   Fedora 40 and later). Intel Macs are not supported yet: the ONNX
    Runtime build ClipCut uses for the voice has no Intel macOS version.
 
 2. Check it and unpack it:
@@ -225,9 +225,8 @@ cargo build --release
 
 The first build downloads a static ONNX Runtime for the voice model, so it
 needs network access. That runtime needs a C++ toolchain from GCC 14 or
-newer on Linux. Ubuntu 24.04, Debian 13 and Fedora 40 have one. On
-Ubuntu 22.04, install `g++-14` from the `ubuntu-toolchain-r/test` PPA and
-build with `CC=gcc-14 CXX=g++-14 RUSTFLAGS="-C linker=gcc-14" cargo build --release`.
+newer and glibc 2.38 or newer on Linux. Ubuntu 24.04, Debian 13 and
+Fedora 40 have both; older distros cannot link it.
 
 ## Updating and uninstalling
 
