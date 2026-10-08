@@ -1,0 +1,25 @@
+[package]
+name = "clipcut-tts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clipcut-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+reqwest.workspace = true
+futures.workspace = true
+regex.workspace = true
+# ONNX Runtime for Kokoro-82M; `download-binaries` fetches a static ORT build
+# at compile time so nothing has to be installed on the user's machine.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "download-binaries", "tls-rustls", "copy-dylibs"] }
+hound = "3.5"
+# voices-v1.0.bin is an npz with stored (uncompressed) entries.
+zip = { version = "4", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tracing-subscriber.workspace = true

@@ -1,0 +1,33 @@
+[package]
+name = "clipcut"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "clipcut"
+path = "src/main.rs"
+
+[dependencies]
+clipcut-core.workspace = true
+clipcut-llm.workspace = true
+clipcut-sources.workspace = true
+clipcut-tts.workspace = true
+clipcut-render.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+futures.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
+uuid.workspace = true
+axum = { version = "0.8", features = ["multipart"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["fs", "trace", "compression-gzip"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+rust-embed = { version = "8", features = ["mime-guess"] }
+mime_guess = "2"
+clap = { version = "4", features = ["derive"] }

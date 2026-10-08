@@ -1,0 +1,59 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/core",
+    "crates/llm",
+    "crates/sources",
+    "crates/tts",
+    "crates/render",
+    "crates/app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.88"
+authors = ["Adeeb Ahmad"]
+repository = "https://github.com/adeebahmad01/clipcut"
+homepage = "https://adeebahmad01.github.io/clipcut/"
+description = "Topic in, fast-cut short video out: real YouTube moments, articles, memes and GIFs with a local voiceover."
+
+[workspace.dependencies]
+clipcut-core = { path = "crates/core" }
+clipcut-llm = { path = "crates/llm" }
+clipcut-sources = { path = "crates/sources" }
+clipcut-tts = { path = "crates/tts" }
+clipcut-render = { path = "crates/render" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "gzip"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+url = "2"
+urlencoding = "2"
+dirs = "6"
+which = "8"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+
+# Frame compositing is far too slow unoptimized; keep dev builds usable.
+[profile.dev.package."*"]
+opt-level = 3
+debug = false
+[profile.dev]
+opt-level = 1
+debug = "line-tables-only"
+
