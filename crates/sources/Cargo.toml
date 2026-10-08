@@ -1,0 +1,27 @@
+[package]
+name = "clipcut-sources"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clipcut-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+reqwest.workspace = true
+futures.workspace = true
+regex.workspace = true
+url.workspace = true
+urlencoding.workspace = true
+uuid.workspace = true
+scraper = "0.27"
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+# Minimal CDP client for article screenshots (ws:// to a local Chromium only, no TLS).
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake"] }
+
+[dev-dependencies]
+tracing-subscriber.workspace = true

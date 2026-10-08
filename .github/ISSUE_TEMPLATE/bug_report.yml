@@ -1,0 +1,31 @@
+name: Bug report
+description: Something doesn't work
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `clipcut doctor`
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log lines around the error
+      description: Run with `RUST_LOG=debug clipcut` for more detail. Remove anything private.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Version and OS
+      placeholder: clipcut 0.1.0, Ubuntu 24.04 x86_64
+    validations:
+      required: true

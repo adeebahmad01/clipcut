@@ -1,0 +1,112 @@
+name: Release
+
+# Push a tag like v0.1.0 to build every platform and publish a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build, e.g. v0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu 22.04 keeps the glibc requirement low (2.35) for older distros.
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
+          - { target: aarch64-apple-darwin, os: macos-14 }
+          - { target: x86_64-apple-darwin, os: macos-15-intel }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p clipcut
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="clipcut-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/clipcut" "dist/$name/"
+          cp README.md LICENSE "dist/$name/"
+          cp assets/fonts/OFL.txt "dist/$name/FONTS-OFL.txt"
+          "dist/$name/clipcut" --version
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          if command -v sha256sum >/dev/null; then
+            (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          else
+            (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clipcut-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Collect assets
+        run: |
+          cp scripts/install.sh dist/install.sh
+          (cd dist && cat *.sha256 > SHA256SUMS && ls -la)
+      - name: Release notes
+        run: |
+          version="${TAG#v}"
+          # The section of CHANGELOG.md for this version, without its heading.
+          awk -v v="$version" '
+            $0 ~ "^## \\[?"v"\\]?" {on=1; next}
+            on && /^## / {exit}
+            on {print}
+          ' CHANGELOG.md > notes.md
+          cat >> notes.md <<'EOF'
+
+          ## Install
+
+          ```bash
+          curl -fsSL https://github.com/adeebahmad01/clipcut/releases/latest/download/install.sh | sh
+          ```
+
+          Or download the archive for your platform below, unpack it, and run `./clipcut`.
+          See the [installation guide](https://github.com/adeebahmad01/clipcut/blob/main/docs/Installation.md)
+          for the tools ClipCut needs (ffmpeg, espeak-ng, Claude Code).
+          EOF
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "ClipCut $TAG" --notes-file notes.md --verify-tag
+          fi

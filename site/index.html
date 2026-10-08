@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ClipCut: topic in, short video out</title>
+<meta name="description" content="ClipCut turns a topic into a fast-cut short video made from YouTube moments, article screenshots, memes and GIFs, with a local AI voiceover. Free and open source for Linux and macOS.">
+<meta property="og:title" content="ClipCut">
+<meta property="og:description" content="Type a topic. Get a fast-cut short video made from real footage.">
+<meta property="og:image" content="https://adeebahmad01.github.io/clipcut/assets/screenshot-home.png">
+<meta property="og:type" content="website">
+<meta name="theme-color" content="#0a0a0b">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="top">
+  <div class="wrap top-in">
+    <a class="brand" href="#">
+      <img src="assets/logo.svg" width="26" height="26" alt="">
+      <span>ClipCut</span>
+    </a>
+    <nav aria-label="Main">
+      <a href="#download">Download</a>
+      <a href="#needs">Requirements</a>
+      <a href="#docs">Docs</a>
+      <a class="gh" href="https://github.com/adeebahmad01/clipcut">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+
+<section class="hero">
+  <div class="wrap">
+    <p class="eyebrow">Free · open source · runs on your machine</p>
+    <h1>Topic in.<br><span>Short video out.</span></h1>
+    <p class="lede">
+      ClipCut writes a script about anything you type, then cuts a 9:16 or 16:9
+      video out of 1–3 second YouTube moments, highlighted article screenshots,
+      captioned memes and reaction GIFs, with word-by-word captions and a local
+      AI voiceover.
+    </p>
+    <div class="cta">
+      <a class="btn primary" id="hero-dl" href="#download">Download for <span id="hero-os">your OS</span></a>
+      <a class="btn" href="https://github.com/adeebahmad01/clipcut">View on GitHub</a>
+    </div>
+    <p class="meta" id="version-line">Linux and macOS · Windows via WSL2 · MIT license</p>
+  </div>
+  <div class="wrap shot-wrap">
+    <img class="shot" src="assets/screenshot-home.png" width="1280" height="800"
+         alt="The ClipCut app: a topic box with format, length and voice options, above a grid of recent video projects">
+  </div>
+</section>
+
+<section class="pipeline" aria-labelledby="how">
+  <div class="wrap">
+    <h2 id="how">How it works</h2>
+    <ol class="stages">
+      <li><b>Research</b><span>Searches the web and writes a fact sheet with sources</span></li>
+      <li><b>Hook</b><span>Drafts opening lines; you pick one</span></li>
+      <li><b>Script</b><span>Writes the narration and strips the AI-sounding phrases</span></li>
+      <li><b>Beat sheet</b><span>Splits it into 1–3 second beats and picks a visual for each</span></li>
+      <li><b>Visuals</b><span>Finds the exact YouTube moment, screenshots articles, captions memes</span></li>
+      <li><b>Voiceover</b><span>Speaks it with Kokoro on your CPU and times every word</span></li>
+      <li><b>Render</b><span>Animates every cut with a sound effect and encodes the MP4</span></li>
+    </ol>
+    <p class="note">Review and edit each stage, or turn on <b>Autopilot</b> and come back to a finished
+      <code>final.mp4</code> and a <code>credits.txt</code> that lists every source.</p>
+  </div>
+</section>
+
+<section class="features" aria-label="Features">
+  <div class="wrap grid3">
+    <div class="feat">
+      <h3>Real footage first</h3>
+      <p>Searches YouTube captions for the moment the words are spoken and cuts just those seconds. Stock footage is the last resort.</p>
+    </div>
+    <div class="feat">
+      <h3>Free and local</h3>
+      <p>The voice, search and downloads run on your machine. The only account you need is Claude Code, which writes the script.</p>
+    </div>
+    <div class="feat">
+      <h3>One binary</h3>
+      <p>A native Rust app with the web UI and fonts built in. Open it on your desktop, or from your phone over Wi-Fi.</p>
+    </div>
+  </div>
+</section>
+
+<section id="download" class="download" aria-labelledby="dl-h">
+  <div class="wrap">
+    <h2 id="dl-h">Download</h2>
+    <p class="sub">The quickest way: one command installs ClipCut and offers to install everything it needs.</p>
+
+    <div class="cmd" role="group" aria-label="Install command">
+      <code id="install-cmd">curl -fsSL https://github.com/adeebahmad01/clipcut/releases/latest/download/install.sh | sh</code>
+      <button class="copy" type="button" data-copy="install-cmd">Copy</button>
+    </div>
+    <p class="fine">Linux and macOS. The script checks the download's SHA-256 and asks before every install.
+      <a href="https://github.com/adeebahmad01/clipcut/blob/main/scripts/install.sh">Read it first</a>.</p>
+
+    <h3 class="minor">Or download the app directly</h3>
+    <div class="platforms">
+      <a class="plat" data-target="x86_64-unknown-linux-gnu" href="https://github.com/adeebahmad01/clipcut/releases/latest/download/clipcut-x86_64-unknown-linux-gnu.tar.gz">
+        <b>Linux</b><span>x86_64 · glibc 2.35+</span><i>Download .tar.gz</i>
+      </a>
+      <a class="plat" data-target="aarch64-unknown-linux-gnu" href="https://github.com/adeebahmad01/clipcut/releases/latest/download/clipcut-aarch64-unknown-linux-gnu.tar.gz">
+        <b>Linux ARM64</b><span>Raspberry Pi 5, Graviton…</span><i>Download .tar.gz</i>
+      </a>
+      <a class="plat" data-target="aarch64-apple-darwin" href="https://github.com/adeebahmad01/clipcut/releases/latest/download/clipcut-aarch64-apple-darwin.tar.gz">
+        <b>macOS</b><span>Apple silicon (M1 and later)</span><i>Download .tar.gz</i>
+      </a>
+      <a class="plat" data-target="x86_64-apple-darwin" href="https://github.com/adeebahmad01/clipcut/releases/latest/download/clipcut-x86_64-apple-darwin.tar.gz">
+        <b>macOS Intel</b><span>x86_64</span><i>Download .tar.gz</i>
+      </a>
+      <a class="plat win" href="https://learn.microsoft.com/windows/wsl/install">
+        <b>Windows</b><span>Install WSL2, then use the Linux command</span><i>WSL2 guide</i>
+      </a>
+    </div>
+    <p class="fine">Checksums, older versions and release notes are on the
+      <a href="https://github.com/adeebahmad01/clipcut/releases">releases page</a>.
+      On macOS, run <code>xattr -d com.apple.quarantine clipcut</code> once after unpacking a manual download.</p>
+  </div>
+</section>
+
+<section id="needs" class="needs" aria-labelledby="needs-h">
+  <div class="wrap">
+    <h2 id="needs-h">What you need</h2>
+    <p class="sub">The installer handles these for you. If you'd rather do it by hand, here is each one.</p>
+    <div class="deps">
+      <div class="dep">
+        <div><b>ffmpeg</b> <em class="req">Required</em><p>Cuts clips and encodes the video.</p></div>
+        <a class="btn sm" href="https://ffmpeg.org/download.html">Download</a>
+      </div>
+      <div class="dep">
+        <div><b>espeak-ng</b> <em class="req">Required</em><p>Pronunciation for the Kokoro voice.</p></div>
+        <a class="btn sm" href="https://github.com/espeak-ng/espeak-ng/releases">Download</a>
+      </div>
+      <div class="dep">
+        <div><b>Claude Code</b> <em class="req">Required</em><p>Writes the research, hooks, script and beat sheet. Run <code>claude</code> once to sign in.</p></div>
+        <a class="btn sm" href="https://docs.claude.com/en/docs/claude-code/setup">Download</a>
+      </div>
+      <div class="dep">
+        <div><b>Chrome or Chromium</b> <em class="rec">Recommended</em><p>Article screenshots and the app window. Edge and Brave work too.</p></div>
+        <a class="btn sm" href="https://www.google.com/chrome/">Download</a>
+      </div>
+      <div class="dep">
+        <div><b>Node.js</b> <em class="rec">Recommended</em><p>Lets yt-dlp pass YouTube's player checks. Deno works too.</p></div>
+        <a class="btn sm" href="https://nodejs.org/en/download">Download</a>
+      </div>
+      <div class="dep">
+        <div><b>Python 3</b> <em class="opt">Optional</em><p>Runs the unslop skill's checks.</p></div>
+        <a class="btn sm" href="https://www.python.org/downloads/">Download</a>
+      </div>
+      <div class="dep">
+        <div><b>unslop skill</b> <em class="opt">Optional</em><p>Rewrites the script so it sounds less like AI.</p></div>
+        <a class="btn sm" href="https://github.com/theclaymethod/unslop">Get it</a>
+      </div>
+      <div class="dep">
+        <div><b>Podman</b> <em class="opt">Optional</em><p>Runs a private SearXNG search. Docker works too. Without it, DuckDuckGo is used.</p></div>
+        <a class="btn sm" href="https://podman.io/docs/installation">Download</a>
+      </div>
+    </div>
+
+    <h3 class="minor">Downloaded automatically on first start</h3>
+    <ul class="auto">
+      <li><a href="https://github.com/yt-dlp/yt-dlp">yt-dlp</a> <span>~35 MB</span></li>
+      <li><a href="https://huggingface.co/hexgrad/Kokoro-82M">Kokoro-82M voice model</a> <span>~205 MB</span></li>
+      <li><a href="https://github.com/searxng/searxng">SearXNG</a> container, if Podman or Docker is present</li>
+    </ul>
+
+    <h3 class="minor">Optional free API keys</h3>
+    <p class="fine keys">More GIFs and stock footage with free keys from
+      <a href="https://developers.giphy.com/">GIPHY</a>,
+      <a href="https://developers.google.com/tenor/guides/quickstart">Tenor</a>,
+      <a href="https://www.pexels.com/api/">Pexels</a> and
+      <a href="https://pixabay.com/api/docs/">Pixabay</a>. Add them in Settings → Keys.
+      Imgflip, Wikimedia, Openverse, Iconify and YouTube need none.</p>
+  </div>
+</section>
+
+<section class="start" aria-labelledby="start-h">
+  <div class="wrap">
+    <h2 id="start-h">Quick start</h2>
+    <div class="steps">
+      <div class="step"><span class="n">1</span><div><b>Install</b><pre><code>curl -fsSL https://github.com/adeebahmad01/clipcut/releases/latest/download/install.sh | sh</code></pre></div></div>
+      <div class="step"><span class="n">2</span><div><b>Sign in to Claude Code once</b><pre><code>claude</code></pre></div></div>
+      <div class="step"><span class="n">3</span><div><b>Start ClipCut</b><pre><code>clipcut</code></pre><p>Open the URL it prints. The Network URL works from your phone.</p></div></div>
+      <div class="step"><span class="n">4</span><div><b>Type a topic and press Make</b><p>Or from the terminal: <code>clipcut new "Why the Moon is drifting away"</code></p></div></div>
+    </div>
+    <img class="shot small" src="assets/screenshot-project.png" width="1280" height="800" loading="lazy"
+         alt="A finished ClipCut project: the video player next to the seven completed pipeline stages">
+  </div>
+</section>
+
+<section id="docs" class="docs" aria-labelledby="docs-h">
+  <div class="wrap">
+    <h2 id="docs-h">Docs</h2>
+    <div class="grid3 doclinks">
+      <a href="https://github.com/adeebahmad01/clipcut/blob/main/docs/Installation.md"><b>Installation</b><span>Every OS, every dependency, building from source</span></a>
+      <a href="https://github.com/adeebahmad01/clipcut/blob/main/docs/Usage.md"><b>Usage</b><span>The app, the CLI, projects, music and sound effects</span></a>
+      <a href="https://github.com/adeebahmad01/clipcut/blob/main/docs/Configuration.md"><b>Configuration</b><span>Every setting in config.toml</span></a>
+      <a href="https://github.com/adeebahmad01/clipcut/blob/main/docs/Troubleshooting.md"><b>Troubleshooting</b><span>Fixes for common problems</span></a>
+      <a href="https://github.com/adeebahmad01/clipcut/blob/main/docs/Architecture.md"><b>Architecture</b><span>How the pieces fit together</span></a>
+      <a href="https://github.com/adeebahmad01/clipcut/blob/main/CONTRIBUTING.md"><b>Contributing</b><span>Build it, test it, send a pull request</span></a>
+    </div>
+  </div>
+</section>
+
+<section class="responsible">
+  <div class="wrap">
+    <p><b>Use footage responsibly.</b> ClipCut takes short clips from YouTube and other public sources
+      and lists every one in <code>credits.txt</code>. You are responsible for how you use what it makes:
+      check the terms of the sites you take footage from and the rules of the platform you post to.</p>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap foot">
+    <span>ClipCut · MIT license · fonts under the SIL OFL</span>
+    <span><a href="https://github.com/adeebahmad01/clipcut">GitHub</a> · <a href="https://github.com/adeebahmad01/clipcut/releases">Releases</a> · <a href="https://github.com/adeebahmad01/clipcut/issues">Issues</a></span>
+  </div>
+</footer>
+
+<script src="site.js"></script>
+</body>
+</html>

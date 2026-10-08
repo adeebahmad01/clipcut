@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0a0a0b">
+  <title>ClipCut</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23c8ff3e'/%3E%3Cpath d='M12 9.5v13l10.5-6.5z' fill='%230a0a0b'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#app">Skip to content</a>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="logo" href="#/" aria-label="ClipCut home">
+        <svg class="logo-mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"/><path d="M12 9.5v13l10.5-6.5z" fill="#0a0a0b"/></svg>
+        <span class="logo-text">ClipCut</span>
+      </a>
+      <nav class="nav" aria-label="Main">
+        <a href="#/" data-nav="home">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h14v18H5zM5 8h3M5 12h3M5 16h3M16 8h3M16 12h3M16 16h3M8 3v18M16 3v18"/></svg>
+          <span>Projects</span>
+        </a>
+        <a href="#/settings" data-nav="settings">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></svg>
+          <span>Settings</span>
+        </a>
+      </nav>
+      <div class="conn" id="conn" data-state="connecting" role="status">
+        <span class="conn-dot" aria-hidden="true"></span>
+        <span class="conn-label" id="conn-label"></span>
+      </div>
+    </div>
+  </header>
+  <div class="banner" id="banner" role="region" aria-label="Setup notice" hidden></div>
+  <main id="app" tabindex="-1">
+    <noscript><p style="padding:2rem">ClipCut needs JavaScript.</p></noscript>
+  </main>
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+</body>
+</html>

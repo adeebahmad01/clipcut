@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Troubleshooting guide
+    url: https://github.com/adeebahmad01/clipcut/blob/main/docs/Troubleshooting.md
+    about: Fixes for the most common problems
+  - name: Security problem
+    url: https://github.com/adeebahmad01/clipcut/security/advisories/new
+    about: Report privately, not in a public issue
