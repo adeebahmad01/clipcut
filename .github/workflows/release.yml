@@ -28,8 +28,8 @@ jobs:
           # Ubuntu 22.04 keeps the glibc requirement low (2.35) for older distros.
           - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
           - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
+          # ort has no prebuilt ONNX Runtime for Intel Macs, so only Apple silicon.
           - { target: aarch64-apple-darwin, os: macos-14 }
-          - { target: x86_64-apple-darwin, os: macos-15-intel }
     steps:
       - uses: actions/checkout@v4
         with:
@@ -40,8 +40,35 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+      # ort's prebuilt ONNX Runtime needs GCC 14's libstdc++, newer than
+      # Ubuntu 22.04 ships. Link it statically with GCC 14 so the binary
+      # only needs glibc 2.35 at runtime.
+      - name: Linux toolchain
+        if: runner.os == 'Linux'
+        run: |
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+          sudo apt-get install -y --no-install-recommends gcc-14 g++-14
+          mkdir -p "$RUNNER_TEMP/static-cxx"
+          cp "$(g++-14 -print-file-name=libstdc++.a)" "$RUNNER_TEMP/static-cxx/"
+          target_env="$(echo '${{ matrix.target }}' | tr 'a-z-' 'A-Z_')"
+          {
+            echo "CC=gcc-14"
+            echo "CXX=g++-14"
+            echo "CARGO_TARGET_${target_env}_LINKER=gcc-14"
+            echo "RUSTFLAGS=-L native=$RUNNER_TEMP/static-cxx"
+          } >> "$GITHUB_ENV"
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }} -p clipcut
+      - name: Check runtime dependencies
+        if: runner.os == 'Linux'
+        run: |
+          bin="target/${{ matrix.target }}/release/clipcut"
+          readelf -d "$bin" | grep NEEDED
+          if readelf -d "$bin" | grep -q 'libstdc++'; then
+            echo "libstdc++ should be linked statically" >&2; exit 1
+          fi
+          echo "Highest glibc symbol:"
+          objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
       - name: Package
         shell: bash
         run: |

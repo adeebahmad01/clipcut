@@ -20,8 +20,9 @@ pushed.
    a GitHub release with:
 
    - `clipcut-<target>.tar.gz` and `clipcut-<target>.tar.gz.sha256` for
-     `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
-     `aarch64-apple-darwin` and `x86_64-apple-darwin`
+     `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` and
+     `aarch64-apple-darwin`. Intel macOS is left out because ort has no
+     prebuilt ONNX Runtime for it.
    - `install.sh`
    - `SHA256SUMS`
 

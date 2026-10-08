@@ -58,7 +58,6 @@ Or download an archive from the
 | Linux x86_64 | [clipcut-x86_64-unknown-linux-gnu.tar.gz](https://github.com/adeebahmad01/clipcut/releases/latest/download/clipcut-x86_64-unknown-linux-gnu.tar.gz) |
 | Linux ARM64 | [clipcut-aarch64-unknown-linux-gnu.tar.gz](https://github.com/adeebahmad01/clipcut/releases/latest/download/clipcut-aarch64-unknown-linux-gnu.tar.gz) |
 | macOS Apple silicon | [clipcut-aarch64-apple-darwin.tar.gz](https://github.com/adeebahmad01/clipcut/releases/latest/download/clipcut-aarch64-apple-darwin.tar.gz) |
-| macOS Intel | [clipcut-x86_64-apple-darwin.tar.gz](https://github.com/adeebahmad01/clipcut/releases/latest/download/clipcut-x86_64-apple-darwin.tar.gz) |
 | Windows | Use [WSL2](https://learn.microsoft.com/windows/wsl/install) and the Linux installer |
 
 ### What it needs

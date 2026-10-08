@@ -23,8 +23,8 @@ First public release.
 - Automatic setup of yt-dlp, the Kokoro model and a SearXNG container.
 - `clipcut doctor` checks every dependency and suggests the fix.
 - Rotation of up to five API keys per service, with rate-limit rests.
-- Release binaries for Linux (x86_64, ARM64) and macOS (Apple silicon,
-  Intel), and a one-line installer.
+- Release binaries for Linux (x86_64, ARM64) and macOS (Apple silicon),
+  and a one-line installer.
 
 [Unreleased]: https://github.com/adeebahmad01/clipcut/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/adeebahmad01/clipcut/releases/tag/v0.1.0

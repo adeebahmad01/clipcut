@@ -64,6 +64,14 @@ case "$arch" in
   aarch64|arm64) arch_part="aarch64" ;;
   *) die "unsupported CPU: $arch" ;;
 esac
+if [ "$os" = Darwin ] && [ "$arch_part" = x86_64 ]; then
+  # A shell under Rosetta reports x86_64 on Apple silicon.
+  if [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = 1 ]; then
+    arch_part="aarch64"
+  else
+    die "Intel Macs are not supported yet: the ONNX Runtime build ClipCut uses for the voice has no Intel macOS version."
+  fi
+fi
 target="$arch_part-$os_part"
 asset="clipcut-$target.tar.gz"
 if [ "$VERSION" = latest ]; then
