@@ -84,6 +84,12 @@ pub fn slug(s: &str) -> String {
     if out.is_empty() { "x".into() } else { out }
 }
 
+/// Control-free, whitespace-collapsed text cut to at most `max_chars` chars.
+pub(crate) fn clean_text(s: &str, max_chars: usize) -> String {
+    let joined = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    joined.chars().filter(|c| !c.is_control()).take(max_chars).collect::<String>().trim_end().to_string()
+}
+
 /// Lowercased host without `www.`.
 pub fn host(url: &str) -> String {
     url::Url::parse(url)
@@ -337,6 +343,9 @@ mod tests {
     #[test]
     fn unicode_slug_and_safe_paths() {
         assert!(slug(&"界".repeat(100)).len() <= 80);
+        assert_eq!(clean_text("  a\n\tb \u{7}c\u{0}d  ", 10), "a b cd");
+        assert_eq!(clean_text(&"界".repeat(400), 300).chars().count(), 300);
+        assert_eq!(clean_text("ab cd", 3), "ab");
         for bad in ["", "../beat", ".", "/tmp/a", "a.b", "a/b"] {
             assert!(validate_stem(bad).is_err());
         }

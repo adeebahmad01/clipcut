@@ -1,6 +1,7 @@
 //! Text stages through the local coding-agent CLIs (Claude Code by default,
-//! Codex as fallback): research, hooks, script (+ unslop), beat sheet, and
-//! small structured picks used while fetching visuals.
+//! Codex as fallback): research, hooks, script (+ unslop), beat sheet, small
+//! structured picks used while fetching visuals, and highlight picks for
+//! clipping long videos.
 //!
 //! PUBLIC API CONTRACT — the app crate codes against these signatures.
 
@@ -50,6 +51,19 @@ pub struct CandidateBrief {
     pub provider: String,
     #[serde(default)]
     pub detail: String,
+}
+
+/// One self-contained clip picked from a long video, snapped to caption bounds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Highlight {
+    pub start_s: f32,
+    pub end_s: f32,
+    /// Short title for the clip (YouTube title).
+    pub title: String,
+    /// 2–8 word on-screen hook.
+    pub hook: String,
+    /// Why this moment stands alone.
+    pub reason: String,
 }
 
 /// Narration pace used for word budgets.
@@ -652,6 +666,94 @@ impl Llm {
             .await?)
     }
 
+    /// Pick up to `count` (1-8) self-contained clips of `min_s`-`max_s`
+    /// seconds from a long video's captions, best first. Times are snapped to
+    /// caption boundaries. If every provider returns fewer usable moments than
+    /// asked, the best partial answer is kept; callers fall back to
+    /// [`heuristic_highlights`] only on an error.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn pick_highlights(
+        &self,
+        title: &str,
+        channel: &str,
+        cues: &[CaptionCue],
+        count: usize,
+        min_s: f32,
+        max_s: f32,
+        progress: &Progress,
+    ) -> anyhow::Result<Vec<Highlight>> {
+        let (count, min_s, max_s) = highlight_bounds(count, min_s, max_s);
+        let timed = timed_cues(cues);
+        let Some(video_end) = timed.iter().map(|c| c.end_s).reduce(f32::max) else {
+            anyhow::bail!("the video has no usable captions to pick highlights from");
+        };
+        let (transcript, abridged) = highlight_transcript(&timed, TRANSCRIPT_BUDGET, max_s);
+        let secs = |s: f32| format!("{}", (s * 10.0).round() / 10.0);
+        let vars = [
+            ("count", count.to_string()),
+            ("min_s", secs(min_s)),
+            ("max_s", secs(max_s)),
+            ("title", or_none(&normalize_ws(title)).to_string()),
+            ("channel", or_none(&normalize_ws(channel)).to_string()),
+            ("end", format!("{video_end:.1}")),
+            (
+                "abridged",
+                if abridged {
+                    " (transcript abridged: omitted stretches are marked; never pick a moment across a gap)".into()
+                } else {
+                    String::new()
+                },
+            ),
+            ("transcript", transcript),
+        ];
+        let vars: Vec<(&str, &str)> = vars.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let call = self.base_call(
+            "Picking highlights",
+            prompts::render(prompts::PICK_HIGHLIGHTS, &vars),
+            schemas::highlights(),
+            false,
+        );
+        progress.info(format!(
+            "Picking {count} highlight moments ({}-{} s) from {:.0} min of captions{}…",
+            secs(min_s),
+            secs(max_s),
+            video_end / 60.0,
+            if abridged { " (abridged transcript)" } else { "" }
+        ));
+        // Keep the best answer that was only short of `count`, in case every
+        // strict attempt fails.
+        let partial: std::sync::Mutex<Option<Vec<Highlight>>> = std::sync::Mutex::new(None);
+        let result = self
+            .run(call, Some(progress), |v, lenient| {
+                let strict = parse_highlights(v.clone(), lenient, cues, count, min_s, max_s);
+                if strict.is_err()
+                    && let Ok(found) = parse_highlights(v, true, cues, count, min_s, max_s)
+                {
+                    let mut best = partial.lock().unwrap_or_else(|e| e.into_inner());
+                    if best.as_ref().is_none_or(|b| found.len() > b.len()) {
+                        *best = Some(found);
+                    }
+                }
+                strict
+            })
+            .await;
+        let highlights = match result {
+            Ok(highlights) => highlights,
+            Err(e) => match partial.into_inner().unwrap_or_else(|e| e.into_inner()) {
+                Some(found) => {
+                    progress.warn(format!(
+                        "Only {} of {count} highlight moments were usable; keeping them",
+                        found.len()
+                    ));
+                    found
+                }
+                None => return Err(e.into()),
+            },
+        };
+        progress.info(format!("Picked {} highlight moments", highlights.len()));
+        Ok(highlights)
+    }
+
     /// Pick an Imgflip template (by exact name from `templates`) and write the caption.
     pub async fn pick_meme(
         &self,
@@ -1150,6 +1252,385 @@ pub fn parse_moment(
     Ok(Some((start, end)))
 }
 
+/// Transcript size cap for the highlight prompt (bytes, roughly chars).
+const TRANSCRIPT_BUDGET: usize = 60_000;
+/// Float slack when comparing caption times.
+const TIME_EPS: f32 = 0.05;
+
+/// (count 1-8, min, max) with 5 <= min <= max <= 180 seconds.
+fn highlight_bounds(count: usize, min_s: f32, max_s: f32) -> (usize, f32, f32) {
+    let sane = |v: f32, default: f32| {
+        if v.is_finite() {
+            v.clamp(5.0, 180.0)
+        } else {
+            default
+        }
+    };
+    let (a, b) = (sane(min_s, 15.0), sane(max_s, 60.0));
+    (count.clamp(1, 8), a.min(b), a.max(b))
+}
+
+/// Cues with finite, ordered times, sorted by start.
+fn timed_cues(cues: &[CaptionCue]) -> Vec<&CaptionCue> {
+    let mut out: Vec<&CaptionCue> = cues
+        .iter()
+        .filter(|c| c.start_s.is_finite() && c.end_s.is_finite() && 0.0 <= c.start_s && c.start_s <= c.end_s)
+        .collect();
+    out.sort_by(|a, b| a.start_s.total_cmp(&b.start_s));
+    out
+}
+
+/// Timestamped `[start-end] text` lines of at most `budget` bytes: raw cues
+/// when they fit, else ~8-15 s merged lines, else evenly spaced stretches of
+/// merged lines with the gaps marked. Returns (text, abridged).
+fn highlight_transcript(cues: &[&CaptionCue], budget: usize, max_s: f32) -> (String, bool) {
+    let line = |(s, e, t): &(f32, f32, String)| format!("[{s:.1}-{e:.1}] {}", truncate_chars(t, 600));
+    let size = |lines: &[String]| lines.iter().map(|l| l.len() + 1).sum::<usize>();
+    let mut raw: Vec<(f32, f32, String)> = Vec::new();
+    for c in cues {
+        let text = normalize_ws(&c.text);
+        // Rolling auto-captions repeat the previous cue; keep one copy.
+        if text.is_empty() || raw.last().is_some_and(|(_, _, t)| *t == text) {
+            continue;
+        }
+        raw.push((c.start_s, c.end_s, text));
+    }
+    let lines: Vec<String> = raw.iter().map(line).collect();
+    if size(&lines) <= budget {
+        return (lines.join("\n"), false);
+    }
+    let mut merged: Vec<(f32, f32, String)> = Vec::new();
+    for (start, end, text) in raw {
+        if let Some((s, e, t)) = merged.last_mut() {
+            let span = *e - *s;
+            let close = start - *e > 2.0
+                || end - *s > 15.0
+                || span >= 12.0
+                || (span >= 8.0 && t.ends_with(['.', '?', '!']));
+            if !close {
+                if !t.ends_with(&text) {
+                    t.push(' ');
+                    t.push_str(&text);
+                }
+                *e = e.max(end);
+                continue;
+            }
+        }
+        merged.push((start, end, text));
+    }
+    let lines: Vec<String> = merged.iter().map(line).collect();
+    let total = size(&lines);
+    if total <= budget {
+        return (lines.join("\n"), false);
+    }
+    // Keep whole stretches (about 1.5 clip lengths each) so every kept part
+    // can still hold a complete moment.
+    let gap = "(… part of the transcript omitted …)";
+    let run = ((max_s * 1.5 / 10.0).ceil() as usize).clamp(4, 24);
+    let runs = lines.len().div_ceil(run);
+    let mut keep = (runs * budget / total).clamp(1, runs);
+    loop {
+        let mut out: Vec<&str> = Vec::new();
+        let mut next = 0;
+        for i in 0..keep {
+            let r = (2 * i + 1) * runs / (2 * keep);
+            let from = r * run;
+            if from > next {
+                out.push(gap);
+            }
+            let to = (from + run).min(lines.len());
+            out.extend(lines[from..to].iter().map(String::as_str));
+            next = to;
+        }
+        if next < lines.len() {
+            out.push(gap);
+        }
+        let text = out.join("\n");
+        if text.len() <= budget {
+            return (text, true);
+        }
+        if keep == 1 {
+            return (truncate_chars(&text, budget), true);
+        }
+        keep = (keep * 9 / 10).min(keep - 1).max(1);
+    }
+}
+
+/// The value in `values` nearest to `t`, if within `within` seconds.
+fn nearest(values: impl Iterator<Item = f32>, t: f32, within: f32) -> Option<f32> {
+    values
+        .filter(|v| (v - t).abs() <= within)
+        .min_by(|a, b| (a - t).abs().total_cmp(&(b - t).abs()))
+}
+
+/// Back to the start of the cue containing `t` (a printed start matches its
+/// cue), else the nearest cue start within 1.5 s.
+fn snap_start(cues: &[&CaptionCue], t: f32) -> f32 {
+    let starts = || cues.iter().map(|c| c.start_s);
+    nearest(starts(), t, 0.1)
+        .or_else(|| {
+            cues.iter()
+                .filter(|c| c.start_s <= t && t < c.end_s)
+                .map(|c| c.start_s)
+                .reduce(f32::max)
+        })
+        .or_else(|| nearest(starts(), t, 1.5))
+        .unwrap_or(t)
+}
+
+/// Forward to the end of the cue containing `t`, else the nearest cue end
+/// within 1.5 s.
+fn snap_end(cues: &[&CaptionCue], t: f32) -> f32 {
+    let ends = || cues.iter().map(|c| c.end_s);
+    nearest(ends(), t, 0.1)
+        .or_else(|| {
+            cues.iter()
+                .filter(|c| c.start_s < t && t <= c.end_s)
+                .map(|c| c.end_s)
+                .reduce(f32::min)
+        })
+        .or_else(|| nearest(ends(), t, 1.5))
+        .unwrap_or(t)
+}
+
+/// Snap a window to caption bounds, then fit it to `min_s..=max_s` along cue
+/// ends. `None` if it stays shorter than `min_s - 1`.
+fn fit_window(cues: &[&CaptionCue], start: f32, end: f32, min_s: f32, max_s: f32) -> Option<(f32, f32)> {
+    let start = snap_start(cues, start);
+    let mut end = snap_end(cues, end).max(start);
+    let ends = || cues.iter().map(|c| c.end_s);
+    let (lo, hi) = (start + min_s - TIME_EPS, start + max_s + TIME_EPS);
+    if end > hi {
+        end = ends()
+            .filter(|&e| e > start && e <= hi)
+            .reduce(f32::max)
+            .unwrap_or(start + max_s);
+    } else if end < lo {
+        end = ends()
+            .filter(|&e| e >= lo && e <= hi)
+            .reduce(f32::min)
+            .or_else(|| ends().filter(|&e| e > end && e <= hi).reduce(f32::max))
+            .unwrap_or(end);
+    }
+    (end - start >= min_s - 1.0).then_some((start, end))
+}
+
+fn overlap(a: (f32, f32), b: (f32, f32)) -> f32 {
+    a.1.min(b.1) - a.0.max(b.0)
+}
+
+/// Caption text spoken inside `start..end`.
+fn window_text(cues: &[&CaptionCue], start: f32, end: f32) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for c in cues
+        .iter()
+        .filter(|c| c.start_s >= start - TIME_EPS && c.start_s < end - TIME_EPS)
+    {
+        let text = clean_narration(&c.text);
+        if !text.is_empty() && out.last() != Some(&text) {
+            out.push(text);
+        }
+    }
+    out.join(" ")
+}
+
+/// First `words` words, capitalized, at most `max_chars`, no dangling punctuation.
+fn headline(text: &str, words: usize, max_chars: usize) -> String {
+    let dash = |c: char| matches!(c, '-' | '–' | '—' | '>' | '•') || c.is_whitespace();
+    let text = normalize_ws(text);
+    // Caption speaker marks (">>", "-") are not words.
+    let short = truncate_chars(&truncate_words(text.trim_start_matches(dash), words), max_chars);
+    let short = short.trim_end_matches(|c: char| matches!(c, ',' | ';' | ':') || dash(c));
+    let mut chars = short.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// Validate picked highlights: snap each moment to caption bounds, fit it to
+/// `min_s..=max_s`, drop out-of-range moments and overlaps (> 1 s) with an
+/// earlier one, and clean the text. Keeps the model's order (best first), at
+/// most `count`. Strict mode also rejects fewer moments than the video can
+/// plausibly hold; lenient mode accepts any nonempty result.
+pub fn parse_highlights(
+    value: Value,
+    lenient: bool,
+    cues: &[CaptionCue],
+    count: usize,
+    min_s: f32,
+    max_s: f32,
+) -> Result<Vec<Highlight>, Rejection> {
+    schemas::validate(&value, &schemas::highlights()).map_err(invalid)?;
+    let (count, min_s, max_s) = highlight_bounds(count, min_s, max_s);
+    let cues = timed_cues(cues);
+    let (Some(first), Some(video_end)) = (
+        cues.first().map(|c| c.start_s),
+        cues.iter().map(|c| c.end_s).reduce(f32::max),
+    ) else {
+        return Err(Rejection::Unusable(
+            "there are no timed captions to anchor highlights to".into(),
+        ));
+    };
+    #[derive(Deserialize)]
+    struct RawMoment {
+        start: f64,
+        end: f64,
+        title: String,
+        hook: String,
+        reason: String,
+    }
+    #[derive(Deserialize)]
+    struct Raw {
+        moments: Vec<RawMoment>,
+    }
+    let raw: Raw = serde_json::from_value(value).map_err(invalid)?;
+    let returned = raw.moments.len();
+    let quotes = ['"', '“', '”'];
+    let mut out: Vec<Highlight> = Vec::new();
+    let mut problems: Vec<String> = Vec::new();
+    for (i, m) in raw.moments.into_iter().enumerate() {
+        if out.len() == count {
+            break;
+        }
+        let n = i + 1;
+        let (start, end) = (m.start as f32, m.end as f32);
+        if !start.is_finite() || !end.is_finite() || end <= start {
+            problems.push(format!("moment {n} needs finite times with end after start"));
+            continue;
+        }
+        if start >= video_end || end <= 0.0 {
+            problems.push(format!(
+                "moment {n} ({start:.1}-{end:.1} s) is outside the video (0-{video_end:.1} s)"
+            ));
+            continue;
+        }
+        let Some((start, end)) = fit_window(&cues, start.max(0.0), end.min(video_end), min_s, max_s)
+        else {
+            problems.push(format!(
+                "moment {n} is shorter than {min_s:.0} s once aligned to the captions"
+            ));
+            continue;
+        };
+        if let Some(h) = out.iter().find(|h| overlap((h.start_s, h.end_s), (start, end)) > 1.0) {
+            problems.push(format!(
+                "moment {n} ({start:.1}-{end:.1} s) overlaps an earlier one ({:.1}-{:.1} s)",
+                h.start_s, h.end_s
+            ));
+            continue;
+        }
+        let mut title = truncate_chars(clean_field(&m.title).trim_matches(quotes), 80);
+        let hook = truncate_chars(&truncate_words(clean_field(&m.hook).trim_matches(quotes), 8), 60);
+        let mut hook = headline(&hook, 8, 60);
+        if title.is_empty() {
+            title = if hook.is_empty() {
+                headline(&window_text(&cues, start, end), 8, 70)
+            } else {
+                hook.clone()
+            };
+        }
+        if hook.is_empty() {
+            hook = headline(&title, 5, 60);
+        }
+        out.push(Highlight {
+            start_s: start,
+            end_s: end,
+            title,
+            hook,
+            reason: truncate_chars(&clean_field(&m.reason), 200),
+        });
+    }
+    problems.truncate(6);
+    if out.is_empty() {
+        return Err(Rejection::Invalid(format!(
+            "no usable moments ({}); return non-overlapping moments of {min_s:.0}-{max_s:.0} s inside 0-{video_end:.1} s, in seconds",
+            if problems.is_empty() { "the list was empty".into() } else { problems.join("; ") }
+        )));
+    }
+    // A typical clip every two clip lengths; short videos need fewer.
+    let capacity = (((video_end - first) / (min_s + max_s)).floor() as usize).max(1);
+    let need = count.min(capacity);
+    if !lenient && out.len() < need {
+        return Err(Rejection::Invalid(format!(
+            "only {} of the {need} requested moments are usable ({}); return {need} non-overlapping moments of {min_s:.0}-{max_s:.0} s inside 0-{video_end:.1} s",
+            out.len(),
+            if problems.is_empty() { format!("the list had {returned}") } else { problems.join("; ") }
+        )));
+    }
+    Ok(out)
+}
+
+/// Spoken words per second plus small bonuses for questions, exclamations,
+/// numbers and a few attention words.
+fn density_score(spoken: &str, seconds: f32) -> f32 {
+    let words = text::norm_words(spoken);
+    let attention = ["secret", "never", "always", "mistake", "why", "how"];
+    let hits = words.iter().filter(|w| attention.contains(&w.as_str())).count();
+    words.len() as f32 / seconds.max(1.0)
+        + 0.15 * spoken.matches('?').count().min(3) as f32
+        + 0.1 * spoken.matches('!').count().min(3) as f32
+        + if spoken.chars().any(|c| c.is_ascii_digit()) { 0.2 } else { 0.0 }
+        + 0.15 * hits.min(4) as f32
+}
+
+/// Fallback when every provider fails: the densest, most quotable
+/// non-overlapping stretches of ~`(min_s + max_s) / 2` seconds, best first.
+/// Skips the first and last 30 s of videos over 5 minutes. Empty when no
+/// stretch reaches `min_s`.
+pub fn heuristic_highlights(cues: &[CaptionCue], count: usize, min_s: f32, max_s: f32) -> Vec<Highlight> {
+    let (count, min_s, max_s) = highlight_bounds(count, min_s, max_s);
+    let cues = timed_cues(cues);
+    let Some(video_end) = cues.iter().map(|c| c.end_s).reduce(f32::max) else {
+        return Vec::new();
+    };
+    let (lo, hi) = if video_end > 300.0 {
+        (30.0, video_end - 30.0)
+    } else {
+        (0.0, video_end)
+    };
+    let target = (min_s + max_s) / 2.0;
+    let mut scored: Vec<(f32, f32, f32, String)> = Vec::new();
+    for (i, c) in cues.iter().enumerate() {
+        if c.start_s < lo - TIME_EPS || c.text.trim().is_empty() {
+            continue;
+        }
+        if c.start_s + min_s > hi {
+            break;
+        }
+        // Only cues that can fall inside this window matter.
+        let near = &cues[i..i + cues[i..].partition_point(|n| n.start_s <= c.start_s + max_s)];
+        let Some((start, end)) = fit_window(near, c.start_s, (c.start_s + target).min(hi), min_s, max_s) else {
+            continue;
+        };
+        if end > hi + TIME_EPS {
+            continue;
+        }
+        let text = window_text(near, start, end);
+        if !text.is_empty() {
+            scored.push((density_score(&text, end - start), start, end, text));
+        }
+    }
+    // Stable: earlier windows win ties.
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let mut out: Vec<Highlight> = Vec::new();
+    for (_, start, end, text) in scored {
+        if out.len() == count {
+            break;
+        }
+        if out.iter().any(|h| overlap((h.start_s, h.end_s), (start, end)) > TIME_EPS) {
+            continue;
+        }
+        out.push(Highlight {
+            start_s: start,
+            end_s: end,
+            title: headline(&text, 8, 70),
+            hook: headline(&text, 5, 60),
+            reason: "Dense, quotable stretch (picked without the model)".into(),
+        });
+    }
+    out
+}
+
 /// Map the meme answer onto a canonical template name and trim the captions.
 pub fn parse_meme(
     value: Value,
@@ -1433,5 +1914,208 @@ mod tests {
         let w = cue_window(&cues, "three octopus hearts", None, 100);
         assert_eq!(w.len(), 100);
         assert!(w.iter().any(|c| c.text == "octopus hearts"));
+    }
+
+    /// Contiguous 3 s cues: cue i spans 3i..3i+3.
+    fn cues3(n: usize) -> Vec<CaptionCue> {
+        (0..n)
+            .map(|i| CaptionCue {
+                start_s: 3.0 * i as f32,
+                end_s: 3.0 * i as f32 + 3.0,
+                text: format!("Line {i} says something."),
+            })
+            .collect()
+    }
+
+    fn moments(list: &[(f64, f64)]) -> Value {
+        let items: Vec<Value> = list
+            .iter()
+            .enumerate()
+            .map(|(i, (s, e))| json!({"start": s, "end": e, "title": format!("Clip {i}"), "hook": "A punchy hook", "reason": "It stands alone."}))
+            .collect();
+        json!({ "moments": items })
+    }
+
+    fn spans(h: &[Highlight]) -> Vec<(f32, f32)> {
+        h.iter().map(|h| (h.start_s, h.end_s)).collect()
+    }
+
+    #[test]
+    fn highlight_bounds_are_sane() {
+        assert_eq!(highlight_bounds(0, 1.0, 500.0), (1, 5.0, 180.0));
+        assert_eq!(highlight_bounds(20, 90.0, 30.0), (8, 30.0, 90.0));
+        assert_eq!(highlight_bounds(3, f32::NAN, f32::INFINITY), (3, 15.0, 60.0));
+    }
+
+    #[test]
+    fn highlights_snap_to_cue_bounds() {
+        let cues = cues3(200);
+        let h = parse_highlights(moments(&[(31.0, 59.0)]), false, &cues, 1, 20.0, 60.0).unwrap();
+        assert_eq!(spans(&h), [(30.0, 60.0)]);
+        // Gaps between cues: snap to the nearest cue start/end within 1.5 s.
+        let gapped: Vec<CaptionCue> = (0..100)
+            .map(|i| CaptionCue {
+                start_s: 4.0 * i as f32,
+                end_s: 4.0 * i as f32 + 3.0,
+                text: format!("Cue {i}."),
+            })
+            .collect();
+        let h = parse_highlights(moments(&[(3.5, 33.5)]), false, &gapped, 1, 20.0, 60.0).unwrap();
+        assert_eq!(spans(&h), [(4.0, 35.0)]);
+        // A printed (rounded) start maps to its own cue, not the one before.
+        let mut odd = cues3(200);
+        odd[10].start_s = 30.04;
+        let h = parse_highlights(moments(&[(30.0, 60.0)]), false, &odd, 1, 20.0, 60.0).unwrap();
+        assert_eq!(spans(&h), [(30.04, 60.0)]);
+    }
+
+    #[test]
+    fn highlights_enforce_min_and_max() {
+        let cues = cues3(200);
+        let h = parse_highlights(
+            moments(&[(30.0, 40.0), (90.0, 300.0), (-5.0, 25.0)]),
+            false,
+            &cues,
+            3,
+            20.0,
+            60.0,
+        )
+        .unwrap();
+        // Too short: extended to the first cue end past 20 s. Too long: trimmed
+        // to the last cue end within 60 s. Partly before 0: clamped.
+        assert_eq!(spans(&h), [(30.0, 51.0), (90.0, 150.0), (0.0, 27.0)]);
+        // Can't reach the minimum before the video ends: dropped.
+        let h = parse_highlights(moments(&[(590.0, 595.0), (30.0, 60.0)]), true, &cues, 2, 20.0, 60.0).unwrap();
+        assert_eq!(spans(&h), [(30.0, 60.0)]);
+        for h in parse_highlights(moments(&[(10.0, 11.0), (100.0, 110.0)]), true, &cues, 2, 5.0, 8.0).unwrap() {
+            assert!((4.0..=8.0).contains(&(h.end_s - h.start_s)), "{h:?}");
+        }
+    }
+
+    #[test]
+    fn highlights_drop_overlaps_and_keep_order() {
+        let cues = cues3(200);
+        let v = moments(&[(30.0, 60.0), (45.0, 80.0), (59.0, 90.0), (60.0, 90.0)]);
+        let h = parse_highlights(v, true, &cues, 4, 20.0, 60.0).unwrap();
+        assert_eq!(spans(&h), [(30.0, 60.0), (60.0, 90.0)]);
+        assert_eq!(h[1].title, "Clip 3");
+    }
+
+    #[test]
+    fn highlights_reject_out_of_range() {
+        let cues = cues3(200);
+        let bad = moments(&[(700.0, 720.0), (-30.0, -5.0), (50.0, 40.0), (100.0, 100.0)]);
+        assert!(matches!(
+            parse_highlights(bad.clone(), false, &cues, 4, 20.0, 60.0),
+            Err(Rejection::Invalid(_))
+        ));
+        assert!(matches!(
+            parse_highlights(bad, true, &cues, 4, 20.0, 60.0),
+            Err(Rejection::Invalid(_))
+        ));
+        assert!(matches!(
+            parse_highlights(moments(&[]), true, &cues, 1, 20.0, 60.0),
+            Err(Rejection::Invalid(_))
+        ));
+        assert!(matches!(
+            parse_highlights(json!({"moments":[{"start":"0:30","end":60,"title":"t","hook":"h","reason":"r"}]}), true, &cues, 1, 20.0, 60.0),
+            Err(Rejection::Invalid(_))
+        ));
+        assert!(matches!(
+            parse_highlights(moments(&[(30.0, 60.0)]), true, &[], 1, 20.0, 60.0),
+            Err(Rejection::Unusable(_))
+        ));
+    }
+
+    #[test]
+    fn highlights_cap_count_and_strictness() {
+        let cues = cues3(400);
+        let many: Vec<(f64, f64)> = (0..10).map(|k| (120.0 * k as f64, 120.0 * k as f64 + 30.0)).collect();
+        let h = parse_highlights(moments(&many), false, &cues, 2, 20.0, 60.0).unwrap();
+        assert_eq!(spans(&h), [(0.0, 30.0), (120.0, 150.0)]);
+        assert_eq!(parse_highlights(moments(&many), false, &cues, 50, 20.0, 60.0).unwrap().len(), 8);
+        // Strict mode wants as many as the video can hold; lenient takes fewer.
+        let one = moments(&[(30.0, 60.0)]);
+        assert!(matches!(
+            parse_highlights(one.clone(), false, &cues, 3, 20.0, 60.0),
+            Err(Rejection::Invalid(_))
+        ));
+        assert_eq!(parse_highlights(one.clone(), true, &cues, 3, 20.0, 60.0).unwrap().len(), 1);
+        // A 2-minute video only has room for one.
+        assert_eq!(parse_highlights(one, false, &cues3(40), 3, 20.0, 60.0).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn highlight_text_is_cleaned() {
+        let cues = cues3(200);
+        let v = json!({"moments": [
+            {"start": 30, "end": 60, "title": format!("  \"A   very\nlong {}\" ", "title ".repeat(30)), "hook": "one two three four five six seven eight nine ten", "reason": "r ".repeat(200)},
+            {"start": 90, "end": 120, "title": "Why octopuses have three hearts", "hook": "  ", "reason": "It explains itself."},
+        ]});
+        let h = parse_highlights(v, false, &cues, 2, 20.0, 60.0).unwrap();
+        assert!(h[0].title.starts_with("A very long title"), "{}", h[0].title);
+        assert!(h[0].title.chars().count() <= 80);
+        assert_eq!(h[0].hook, "One two three four five six seven eight");
+        assert!(h[0].reason.chars().count() <= 200);
+        assert_eq!(h[1].hook, "Why octopuses have three hearts");
+        assert!(word_count(&h[1].hook) <= 8);
+    }
+
+    #[test]
+    fn highlight_transcript_merges_then_abridges() {
+        let cues = cues3(400);
+        let timed = timed_cues(&cues);
+        let (text, abridged) = highlight_transcript(&timed, 60_000, 60.0);
+        assert!(!abridged);
+        assert_eq!(text.lines().count(), 400);
+        assert!(text.contains("[30.0-33.0] Line 10 says something."));
+        let (text, abridged) = highlight_transcript(&timed, 13_000, 60.0);
+        assert!(!abridged && text.len() <= 13_000);
+        assert!(text.lines().count() < 200, "merged into ~8-15 s lines");
+        assert!(text.contains("[0.0-9.0] Line 0 says something. Line 1 says something. Line 2 says something."));
+        let (text, abridged) = highlight_transcript(&timed, 5_000, 60.0);
+        assert!(abridged && text.len() <= 5_000);
+        assert!(text.contains("omitted"));
+        let starts: Vec<f32> = text
+            .lines()
+            .filter_map(|l| l.strip_prefix('[')?.split('-').next()?.parse().ok())
+            .collect();
+        assert!(starts.len() > 10 && starts.windows(2).all(|w| w[0] < w[1]));
+        assert!(*starts.last().unwrap() > 900.0, "spread across the video");
+    }
+
+    #[test]
+    fn heuristic_highlights_pick_dense_non_overlapping_windows() {
+        let cues: Vec<CaptionCue> = (0..400)
+            .map(|i| CaptionCue {
+                start_s: 3.0 * i as f32,
+                end_s: 3.0 * i as f32 + 3.0,
+                text: if (200..214).contains(&i) {
+                    ["Why do you never make this one mistake twice?", "It costs 3 lives every single year!"][i % 2].into()
+                } else {
+                    [">> um yeah", "uh right", "so okay", "hmm well"][i % 4].into()
+                },
+            })
+            .collect();
+        let video_end = 1200.0;
+        let h = heuristic_highlights(&cues, 3, 20.0, 60.0);
+        assert_eq!(h.len(), 3);
+        assert!(h[0].start_s <= 642.0 && h[0].end_s >= 600.0, "{:?}", h[0]);
+        assert!(h[0].title.starts_with("Why do you never"), "{}", h[0].title);
+        assert_eq!(h[0].hook, "Why do you never make");
+        for (i, a) in h.iter().enumerate() {
+            assert!(a.start_s >= 30.0 && a.end_s <= video_end - 30.0, "{a:?}");
+            assert!((19.0..=60.0).contains(&(a.end_s - a.start_s)), "{a:?}");
+            assert!(!a.title.is_empty() && a.title.chars().count() <= 70);
+            assert!(word_count(&a.hook) <= 5);
+            for b in &h[i + 1..] {
+                assert!(overlap((a.start_s, a.end_s), (b.start_s, b.end_s)) <= TIME_EPS, "{a:?} {b:?}");
+            }
+        }
+        let h = heuristic_highlights(&cues, 50, 20.0, 60.0);
+        assert_eq!(h.len(), 8);
+        assert_eq!(heuristic_highlights(&cues, 1, 20.0, 60.0).len(), 1);
+        assert!(heuristic_highlights(&cues3(5), 3, 20.0, 60.0).is_empty());
+        assert!(heuristic_highlights(&[], 3, 20.0, 60.0).is_empty());
     }
 }

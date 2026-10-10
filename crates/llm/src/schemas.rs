@@ -140,6 +140,18 @@ pub fn moment() -> Value {
     }))
 }
 
+pub fn highlights() -> Value {
+    obj(json!({
+        "moments": { "type": "array", "items": obj(json!({
+            "start": { "type": "number" },
+            "end": { "type": "number" },
+            "title": string(),
+            "hook": string(),
+            "reason": string(),
+        })) },
+    }))
+}
+
 pub fn meme(templates: &[String]) -> Value {
     let template = if !templates.is_empty() && templates.len() <= 500 {
         json!({ "type": "string", "enum": templates })
@@ -278,6 +290,7 @@ mod tests {
             unslop(),
             beats(),
             moment(),
+            highlights(),
             meme(&["Drake".into()]),
             candidate(),
         ] {
@@ -293,6 +306,9 @@ mod tests {
         assert!(validate(&json!({"index":null}), &candidate()).is_ok());
         assert!(validate(&json!({"found":false,"start":null,"end":null}), &moment()).is_ok());
         assert!(validate(&json!({"found":false}), &moment()).is_err());
+        let moment = json!({"start":1.5,"end":30,"title":"t","hook":"h","reason":"r"});
+        assert!(validate(&json!({"moments":[moment]}), &highlights()).is_ok());
+        assert!(validate(&json!({"moments":[{"start":"0:01","end":30,"title":"t","hook":"h","reason":"r"}]}), &highlights()).is_err());
     }
 
     #[test]

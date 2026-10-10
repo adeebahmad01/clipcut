@@ -9,6 +9,7 @@ pub mod media;
 pub mod model;
 pub mod paths;
 pub mod progress;
+pub mod subtitles;
 pub mod timeline;
 pub mod tools;
 
