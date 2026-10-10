@@ -130,7 +130,7 @@ DuckDuckGo and YouTube need no keys.
 ## Docs
 
 - [Installation](docs/Installation.md): every OS, every dependency, building from source
-- [Usage](docs/Usage.md): the web app, the CLI, projects, music and sound effects
+- [Usage](docs/Usage.md): the web app, the CLI, the queue, clip mode, publishing to YouTube, music and sound effects
 - [Configuration](docs/Configuration.md): every `config.toml` setting
 - [Troubleshooting](docs/Troubleshooting.md): fixes for common problems
 - [Architecture](docs/Architecture.md): how the crates fit together
