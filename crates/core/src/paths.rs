@@ -37,6 +37,14 @@ impl Paths {
     pub fn keys_file(&self) -> PathBuf {
         self.home.join("keys.json")
     }
+    /// Batch queue: topics waiting to become videos.
+    pub fn queue_file(&self) -> PathBuf {
+        self.home.join("queue.json")
+    }
+    /// YouTube OAuth client and tokens (owner-only).
+    pub fn youtube_auth_file(&self) -> PathBuf {
+        self.home.join("youtube-oauth.json")
+    }
     pub fn projects(&self) -> PathBuf {
         self.home.join("projects")
     }

@@ -15,10 +15,13 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use clipcut_core::config::Format;
 use clipcut_core::keys::{KNOWN_SERVICES, MAX_KEYS_PER_SERVICE};
+use clipcut_core::model::{ProjectKind, PublishRecord};
 use clipcut_core::paths::ProjectPaths;
+use clipcut_core::timeline::CaptionPreset;
 use clipcut_core::{
     Beat, BeatStatus, Config, Project, Script, Stage, StageState, VisualKind, VisualPlan,
 };
+use clipcut_sources::{Idea, IdeaSource};
 use futures::{Stream, StreamExt};
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
@@ -30,8 +33,11 @@ use tower_http::compression::Predicate;
 use tower_http::compression::predicate::{DefaultPredicate, NotForContentType};
 use tower_http::services::ServeFile;
 
+use crate::clips::{self, ClipRequest};
 use crate::doctor;
 use crate::pipeline::{self, Outcome};
+use crate::publish::{self, AuthStatus, ClientBody};
+use crate::queue::{self, AddBody, PublishPlan, QueueItem, QueueState};
 use crate::state::{AppState, BeatClaim, ServerEvent};
 
 const MAX_UPLOAD_BYTES: usize = 256 * 1024 * 1024;
@@ -72,6 +78,21 @@ pub fn router(state: AppState) -> Router {
         .route("/projects/{id}/files/{*path}", get(project_file))
         .route("/projects/{id}/still", get(still))
         .route("/projects/{id}/download", get(download))
+        .route("/projects/{id}/publish", post(publish_project))
+        .route("/clips", post(create_clips))
+        .route("/ideas", get(ideas))
+        .route("/queue", get(get_queue).post(add_queue).patch(patch_queue))
+        .route("/queue/clear", post(clear_queue))
+        .route("/queue/{item}", axum::routing::delete(remove_queue_item))
+        .route("/queue/{item}/retry", post(retry_queue_item))
+        .route(
+            "/publish/youtube",
+            get(youtube_status)
+                .put(put_youtube_client)
+                .delete(disconnect_youtube),
+        )
+        .route("/publish/youtube/connect", post(connect_youtube))
+        .route("/publish/youtube/callback-url", post(youtube_callback_url))
         .fallback(|| async { ApiError::not_found("no such API route") });
     Router::new()
         .nest("/api", api)
@@ -229,6 +250,25 @@ fn ensure_editable(state: &AppState, id: &str) -> ApiResult<()> {
             "a visual request is running; wait before editing the project",
         ));
     }
+    ensure_not_uploading(state, id)
+}
+
+fn ensure_not_uploading(state: &AppState, id: &str) -> ApiResult<()> {
+    if state.publish.is_uploading(id) {
+        return Err(ApiError::conflict(
+            "this project is uploading to YouTube; wait for it to finish",
+        ));
+    }
+    Ok(())
+}
+
+/// A clip's narration and footage are its source video.
+fn ensure_story(project: &Project, what: &str) -> ApiResult<()> {
+    if project.kind == ProjectKind::Clip {
+        return Err(ApiError::bad_request(format!(
+            "can't edit the {what} of a clip; it comes from the source video"
+        )));
+    }
     Ok(())
 }
 
@@ -246,6 +286,8 @@ async fn manual_beat(
             "the pipeline or frame preview is running; wait before changing visuals",
         ));
     }
+    ensure_not_uploading(state, id)?;
+    ensure_story(&project, "footage")?;
     let beat = beat_or_404(&project, beat_id)?.clone();
     let claim = state
         .claim_beat(id, beat_id)
@@ -472,6 +514,7 @@ async fn events(
             } => Event::default()
                 .event("project")
                 .json_data(json!({ "id": id, "updated_at": updated_at, "running": running })),
+            ServerEvent::Queue(q) => Event::default().event("queue").json_data(q),
         };
         event.ok().map(Ok)
     });
@@ -496,6 +539,8 @@ struct ProjectSummary {
     duration_s: Option<f32>,
     video_url: Option<String>,
     thumb_url: Option<String>,
+    kind: ProjectKind,
+    published: Vec<PublishRecord>,
 }
 
 fn file_url(state: &AppState, p: &Project, rel: &str, version: i64) -> Option<String> {
@@ -521,7 +566,8 @@ async fn list_projects(State(state): State<AppState>) -> Json<Vec<ProjectSummary
             let (video_url, thumb_url) = match &p.render {
                 Some(r) => (
                     file_url(&state, &p, &r.path, version),
-                    file_url(&state, &p, "render/thumb.png", version),
+                    file_url(&state, &p, "render/thumb.png", version)
+                        .or_else(|| file_url(&state, &p, "render/thumb.jpg", version)),
                 ),
                 None => (None, None),
             };
@@ -535,6 +581,8 @@ async fn list_projects(State(state): State<AppState>) -> Json<Vec<ProjectSummary
                 duration_s: p.render.as_ref().map(|r| r.duration_s),
                 video_url,
                 thumb_url,
+                kind: p.kind,
+                published: p.published,
                 id: p.id,
                 topic: p.topic,
                 created_at: p.created_at,
@@ -556,6 +604,19 @@ struct CreateBody {
     target_seconds: Option<u32>,
     voice: Option<String>,
     autopilot: Option<bool>,
+    caption_preset: Option<CaptionPreset>,
+    extra_formats: Option<Vec<Format>>,
+}
+
+/// Extra formats without the main one or repeats.
+pub(crate) fn clean_extra_formats(main: Format, extra: Vec<Format>) -> Vec<Format> {
+    let mut out = Vec::new();
+    for f in extra {
+        if f != main && !out.contains(&f) {
+            out.push(f);
+        }
+    }
+    out
 }
 
 async fn create_project(
@@ -588,6 +649,9 @@ async fn create_project(
     );
     project.voice = body.voice.filter(|v| !v.trim().is_empty());
     project.autopilot = body.autopilot.unwrap_or(true);
+    project.caption_preset = body.caption_preset;
+    project.extra_formats =
+        clean_extra_formats(project.format, body.extra_formats.unwrap_or_default());
     let project = state.store.create(project).await?;
     pipeline::start(&state, &project.id, None, false).await?;
     Ok(Json(project))
@@ -613,6 +677,19 @@ struct PatchBody {
     title: Option<String>,
     description: Option<String>,
     hashtags: Option<Vec<String>>,
+    /// `null` goes back to the configured default.
+    #[serde(default, deserialize_with = "present")]
+    caption_preset: Option<Option<CaptionPreset>>,
+    extra_formats: Option<Vec<Format>>,
+}
+
+/// Tells a field sent as `null` apart from one left out.
+fn present<'de, T, D>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
 }
 
 async fn patch_project(
@@ -621,8 +698,15 @@ async fn patch_project(
     Json(body): Json<PatchBody>,
 ) -> ApiResult<Json<Project>> {
     let _operation = state.store.operation(&id).await;
-    project_or_404(&state, &id)?;
+    let current = project_or_404(&state, &id)?;
     ensure_editable(&state, &id)?;
+    if body.topic.is_some()
+        || body.notes.is_some()
+        || body.chosen_hook.is_some()
+        || body.script_text.is_some()
+    {
+        ensure_story(&current, "script")?;
+    }
     for (value, max, name) in [
         (body.topic.as_deref(), 1000, "topic"),
         (body.notes.as_deref(), 20_000, "notes"),
@@ -682,9 +766,27 @@ async fn patch_project(
                 if p.format != v {
                     pipeline::reset_from(p, Stage::Render);
                     p.format = v;
+                    p.extra_formats = clean_extra_formats(v, std::mem::take(&mut p.extra_formats));
                 }
             }
+            if let Some(v) = body.extra_formats {
+                let v = clean_extra_formats(p.format, v);
+                if p.extra_formats != v {
+                    pipeline::reset_from(p, Stage::Render);
+                    p.extra_formats = v;
+                }
+            }
+            if let Some(v) = body.caption_preset
+                && p.caption_preset != v
+            {
+                pipeline::reset_from(p, Stage::Render);
+                p.caption_preset = v;
+            }
             if let Some(v) = body.target_seconds {
+                anyhow::ensure!(
+                    p.kind == ProjectKind::Story || p.target_seconds == v,
+                    "a clip's length comes from its source moment"
+                );
                 if p.target_seconds != v {
                     pipeline::reset_from(p, Stage::Script);
                     p.target_seconds = v;
@@ -770,6 +872,7 @@ async fn delete_project(
             "wait for the visual request before deleting",
         ));
     }
+    ensure_not_uploading(&state, &id)?;
     state.store.abort_and_wait(&id).await;
     state.store.delete(&id).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -797,10 +900,14 @@ async fn run_project(
     if state.store.is_running(&id) || state.project_busy(&id) {
         return Err(ApiError::conflict("this project is already running"));
     }
+    ensure_not_uploading(&state, &id)?;
     pipeline::start(&state, &id, body.from, body.only)
         .await
         .map_err(|e| {
-            if state.store.is_running(&id) || state.project_busy(&id) {
+            if state.store.is_running(&id)
+                || state.project_busy(&id)
+                || state.publish.is_uploading(&id)
+            {
                 ApiError::conflict(format!("{e:#}"))
             } else {
                 ApiError::bad_request(format!("{e:#}"))
@@ -835,10 +942,37 @@ async fn duplicate_project(
     copy.hooks = src.hooks.clone();
     copy.chosen_hook = src.chosen_hook;
     copy.script = src.script.clone();
+    copy.caption_preset = src.caption_preset;
+    copy.extra_formats = src.extra_formats.clone();
+    copy.kind = src.kind;
+    copy.clip = src.clip.clone();
+    // A clip's beat is its source moment; the copy fetches it again.
+    if src.kind == ProjectKind::Clip {
+        copy.beats = src
+            .beats
+            .iter()
+            .map(|b| Beat {
+                candidates: Vec::new(),
+                chosen: None,
+                asset: None,
+                status: BeatStatus::Pending,
+                error: None,
+                locked: false,
+                start_s: 0.0,
+                end_s: 0.0,
+                ..b.clone()
+            })
+            .collect();
+    }
     for s in &src.stages {
-        if matches!(s.stage, Stage::Research | Stage::Hooks | Stage::Script)
-            && s.status == clipcut_core::Status::Done
-        {
+        let keep = match s.stage {
+            Stage::Research | Stage::Hooks | Stage::Script => {
+                matches!(s.status, clipcut_core::Status::Done | clipcut_core::Status::Skipped)
+            }
+            Stage::Beats => src.kind == ProjectKind::Clip,
+            _ => false,
+        };
+        if keep {
             *copy.stage_mut(s.stage) = s.clone();
         }
     }
@@ -862,7 +996,11 @@ async fn patch_beat(
 ) -> ApiResult<Json<Beat>> {
     let _operation = state.store.operation(&id).await;
     ensure_editable(&state, &id)?;
-    beat_or_404(&project_or_404(&state, &id)?, &beat)?;
+    let project = project_or_404(&state, &id)?;
+    beat_or_404(&project, &beat)?;
+    if body.text.is_some() || body.visual.is_some() {
+        ensure_story(&project, "footage and narration")?;
+    }
     if let Some(text) = &body.text {
         limited_text(text, 4000, "beat text")?;
         if text.trim().is_empty() {
@@ -1295,9 +1433,16 @@ async fn still(
         .into_response())
 }
 
+#[derive(Deserialize, Default)]
+struct DownloadQuery {
+    /// main (default), vertical, horizontal, square, srt, vtt, thumb or credits.
+    file: Option<String>,
+}
+
 async fn download(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(q): Query<DownloadQuery>,
     req: Request,
 ) -> ApiResult<Response> {
     let project = project_or_404(&state, &id)?;
@@ -1305,8 +1450,46 @@ async fn download(
         .render
         .as_ref()
         .ok_or_else(|| ApiError::not_found("not rendered yet"))?;
-    let path = safe_join(&state.store.dir(&id), &render.path)
-        .ok_or_else(|| ApiError::not_found("render file missing"))?;
+    let which = q.file.as_deref().unwrap_or("main");
+    let missing = || ApiError::not_found(format!("this render has no {which} file"));
+    let (rel, suffix, ext) = match which {
+        "main" => (render.path.as_str(), String::new(), "mp4"),
+        "vertical" | "horizontal" | "square" => {
+            let format: Format = serde_json::from_value(json!(which))
+                .map_err(|_| ApiError::bad_request("unknown format"))?;
+            let (rel, _, _) = render.file_for(project.format, format).ok_or_else(missing)?;
+            let suffix = if format == project.format {
+                String::new()
+            } else {
+                format!("-{which}")
+            };
+            (rel, suffix, "mp4")
+        }
+        "srt" | "vtt" => {
+            let subs = render.subtitles.as_ref().ok_or_else(missing)?;
+            let rel = if which == "srt" { &subs.srt } else { &subs.vtt };
+            (rel.as_str(), String::new(), which)
+        }
+        "thumb" => (
+            render.thumbnail_jpg.as_deref().ok_or_else(missing)?,
+            "-thumbnail".to_string(),
+            "jpg",
+        ),
+        "credits" => (render.credits_path.as_str(), "-credits".to_string(), "txt"),
+        _ => {
+            return Err(ApiError::bad_request(
+                "file must be main, vertical, horizontal, square, srt, vtt, thumb or credits",
+            ));
+        }
+    };
+    let path = safe_join(&state.store.dir(&id), rel)
+        .filter(|p| p.is_file())
+        .ok_or_else(missing)?;
+    let ext = FsPath::new(rel)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or(ext)
+        .to_ascii_lowercase();
     let name = slug(
         project
             .script
@@ -1320,10 +1503,333 @@ async fn download(
         .await
         .map_err(|e| anyhow::anyhow!(e))?
         .map(Body::new);
-    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{name}.mp4\"")) {
+    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{name}{suffix}.{ext}\"")) {
         res.headers_mut().insert(header::CONTENT_DISPOSITION, v);
     }
     Ok(res)
+}
+
+// ---------------------------------------------------------------------------
+// Publishing
+
+fn upstream(e: anyhow::Error) -> ApiError {
+    ApiError(StatusCode::BAD_GATEWAY, format!("{e:#}"))
+}
+
+fn ensure_youtube_connected(state: &AppState) -> ApiResult<()> {
+    if !state.publish.status().connected {
+        return Err(ApiError::bad_request(
+            "YouTube isn't connected; connect it in Settings → YouTube",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct PublishBody {
+    /// Which render to upload (default: the main one).
+    #[serde(default)]
+    format: Option<Format>,
+    #[serde(flatten)]
+    plan: PublishPlan,
+}
+
+async fn publish_project(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<PublishBody>,
+) -> ApiResult<Json<PublishRecord>> {
+    queue::validate_plan(&body.plan).map_err(ApiError::bad_request)?;
+    let project = project_or_404(&state, &id)?;
+    if state.store.is_running(&id) {
+        return Err(ApiError::conflict(
+            "the project is still running; publish it after the render finishes",
+        ));
+    }
+    ensure_not_uploading(&state, &id)?;
+    let render = project
+        .render
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("render the project before publishing it"))?;
+    let format = body.format.unwrap_or(project.format);
+    if render.file_for(project.format, format).is_none() {
+        return Err(ApiError::bad_request(format!(
+            "this project has no {} render; add that format and render again",
+            format.slug()
+        )));
+    }
+    ensure_youtube_connected(&state)?;
+    // A closed tab must not cut an upload off halfway.
+    let task = tokio::spawn(async move {
+        let progress = state.progress(&id);
+        let result = publish::upload(
+            &state,
+            &id,
+            body.format,
+            &body.plan.privacy,
+            body.plan.publish_at,
+            &progress,
+        )
+        .await;
+        if let Err(e) = &result {
+            progress.error(format!("Publishing failed: {e:#}"));
+        }
+        result
+    });
+    let record = task
+        .await
+        .map_err(|e| anyhow::anyhow!("the upload stopped: {e}"))?
+        .map_err(|e| {
+            let msg = format!("{e:#}");
+            if msg.starts_with("this project is already uploading")
+                || msg.starts_with("the project is still running")
+            {
+                ApiError::conflict(msg)
+            } else {
+                ApiError(StatusCode::BAD_GATEWAY, msg)
+            }
+        })?;
+    Ok(Json(record))
+}
+
+async fn youtube_status(State(state): State<AppState>) -> Json<AuthStatus> {
+    Json(state.publish.status())
+}
+
+async fn put_youtube_client(
+    State(state): State<AppState>,
+    Json(body): Json<ClientBody>,
+) -> ApiResult<Json<AuthStatus>> {
+    let (client_id, client_secret) =
+        publish::parse_client(&body).map_err(ApiError::bad_request)?;
+    state.publish.set_client(client_id, client_secret).await?;
+    Ok(Json(state.publish.status()))
+}
+
+#[derive(Deserialize, Default)]
+struct DisconnectQuery {
+    /// Forget the OAuth client too.
+    #[serde(default)]
+    all: bool,
+}
+
+async fn disconnect_youtube(
+    State(state): State<AppState>,
+    Query(q): Query<DisconnectQuery>,
+) -> ApiResult<Json<AuthStatus>> {
+    state.publish.disconnect(q.all).await?;
+    Ok(Json(state.publish.status()))
+}
+
+async fn connect_youtube(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    if !state.publish.status().configured {
+        return Err(ApiError::bad_request(
+            "add your Google OAuth client in Settings → YouTube first",
+        ));
+    }
+    let url = publish::connect(&state).await?;
+    Ok(Json(json!({ "url": url })))
+}
+
+#[derive(Deserialize)]
+struct CallbackBody {
+    url: String,
+}
+
+async fn youtube_callback_url(
+    State(state): State<AppState>,
+    Json(body): Json<CallbackBody>,
+) -> ApiResult<Json<AuthStatus>> {
+    limited_text(&body.url, 8192, "url")?;
+    let status = publish::finish_from_url(&state, &body.url)
+        .await
+        .map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
+    Ok(Json(status))
+}
+
+// ---------------------------------------------------------------------------
+// Batch queue
+
+async fn get_queue(State(state): State<AppState>) -> Json<QueueState> {
+    Json(state.queue.snapshot())
+}
+
+fn wants_publish(body: &AddBody) -> bool {
+    body.items.iter().any(|i| i.options.publish.is_some())
+        || (!body.topics.is_empty() && body.options.publish.is_some())
+}
+
+async fn add_queue(
+    State(state): State<AppState>,
+    Json(body): Json<AddBody>,
+) -> ApiResult<Json<Vec<QueueItem>>> {
+    queue::validate(&body).map_err(ApiError::bad_request)?;
+    if wants_publish(&body) {
+        ensure_youtube_connected(&state)?;
+    }
+    Ok(Json(state.queue.add(body)?))
+}
+
+#[derive(Deserialize)]
+struct QueuePatch {
+    paused: bool,
+}
+
+async fn patch_queue(
+    State(state): State<AppState>,
+    Json(body): Json<QueuePatch>,
+) -> ApiResult<Json<QueueState>> {
+    state.queue.set_paused(body.paused)?;
+    Ok(Json(state.queue.snapshot()))
+}
+
+async fn remove_queue_item(
+    State(state): State<AppState>,
+    Path(item): Path<String>,
+) -> ApiResult<Json<QueueState>> {
+    if !queue::remove(&state, &item).await? {
+        return Err(ApiError::not_found(format!("queue item {item} not found")));
+    }
+    Ok(Json(state.queue.snapshot()))
+}
+
+async fn retry_queue_item(
+    State(state): State<AppState>,
+    Path(item): Path<String>,
+) -> ApiResult<Json<QueueState>> {
+    if !state.queue.retry(&item)? {
+        return Err(ApiError::not_found(format!("queue item {item} not found")));
+    }
+    Ok(Json(state.queue.snapshot()))
+}
+
+async fn clear_queue(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let removed = state.queue.clear_finished()?;
+    Ok(Json(json!({ "removed": removed })))
+}
+
+// ---------------------------------------------------------------------------
+// Topic ideas and clips
+
+#[derive(Deserialize)]
+struct IdeasQuery {
+    #[serde(default = "default_idea_source")]
+    source: IdeaSource,
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    geo: String,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+fn default_idea_source() -> IdeaSource {
+    IdeaSource::Trends
+}
+
+async fn ideas(
+    State(state): State<AppState>,
+    Query(q): Query<IdeasQuery>,
+) -> ApiResult<Json<Vec<Idea>>> {
+    if let Some(query) = &q.q {
+        limited_text(query, 200, "q")?;
+    }
+    let geo = q.geo.trim();
+    if !geo.is_empty() && !(geo.len() == 2 && geo.bytes().all(|b| b.is_ascii_alphabetic())) {
+        return Err(ApiError::bad_request(
+            "geo must be a 2-letter country code like US",
+        ));
+    }
+    let limit = q.limit.unwrap_or(12).clamp(1, 25);
+    let ideas = state
+        .services()
+        .sources
+        .ideas(q.source, q.q.as_deref(), geo, limit)
+        .await
+        .map_err(upstream)?;
+    Ok(Json(ideas))
+}
+
+#[derive(Deserialize)]
+struct ClipBody {
+    #[serde(flatten)]
+    req: ClipRequest,
+    #[serde(default)]
+    publish: Option<PublishPlan>,
+    #[serde(default)]
+    publish_every_minutes: Option<u32>,
+    /// Client-chosen id that tags this request's progress events.
+    #[serde(default)]
+    job: Option<String>,
+}
+
+fn validate_clip_body(body: &ClipBody) -> Result<(), String> {
+    let url = body.req.url.trim();
+    if url.is_empty() {
+        return Err("url is required".into());
+    }
+    if url.len() > 2000 {
+        return Err("url is too long (maximum 2000 bytes)".into());
+    }
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err("url must start with http:// or https://".into());
+    }
+    if !(1..=clips::MAX_CLIPS).contains(&body.req.count) {
+        return Err(format!("count must be between 1 and {}", clips::MAX_CLIPS));
+    }
+    let (min, max) = (body.req.min_s, body.req.max_s);
+    let in_range = |s: f32| s.is_finite() && (5.0..=180.0).contains(&s);
+    if !in_range(min) || !in_range(max) || min > max {
+        return Err("min_s and max_s must be 5–180 seconds, min_s ≤ max_s".into());
+    }
+    if let Some(plan) = &body.publish {
+        if !body.req.start {
+            return Err("publish needs start: the clips publish when the queue renders them".into());
+        }
+        queue::validate_plan(plan)?;
+    }
+    queue::validate_spacing(body.publish_every_minutes)?;
+    if body.job.as_ref().is_some_and(|j| {
+        j.is_empty()
+            || j.len() > 40
+            || !j.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    }) {
+        return Err("job must be 1–40 letters, digits, - or _".into());
+    }
+    Ok(())
+}
+
+/// Find the best moments of a long video and save one project per moment.
+/// Progress goes out under `job` (or a new id) while the request waits.
+async fn create_clips(
+    State(state): State<AppState>,
+    Json(mut body): Json<ClipBody>,
+) -> ApiResult<Json<Vec<Project>>> {
+    validate_clip_body(&body).map_err(ApiError::bad_request)?;
+    if body.publish.is_some() {
+        ensure_youtube_connected(&state)?;
+    }
+    body.req.url = body.req.url.trim().to_string();
+    let job = body
+        .job
+        .take()
+        .unwrap_or_else(|| format!("clips-{}", &uuid_short()[..10]));
+    // Keep working if the browser goes away; the projects show up in the list.
+    let task = tokio::spawn(async move {
+        let progress = state.progress(&job);
+        let projects = clips::create(&state, &body.req, &progress).await?;
+        if body.req.start && !projects.is_empty() {
+            state
+                .queue
+                .add_projects(&projects, body.publish, body.publish_every_minutes)?;
+        }
+        anyhow::Ok(projects)
+    });
+    let projects = task
+        .await
+        .map_err(|e| anyhow::anyhow!("the clip finder stopped: {e}"))?
+        .map_err(upstream)?;
+    Ok(Json(projects))
 }
 
 fn slug(s: &str) -> String {
@@ -1386,7 +1892,7 @@ async fn static_file(uri: Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{TestHome, finished_project};
+    use crate::test_support::{TestHome, clip_project, finished_project};
 
     const TEST_HOST: &str = "192.168.100.226:7878";
 
@@ -1764,5 +2270,370 @@ mod tests {
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
             assert!(!state.project_busy(&project.id));
         }
+    }
+
+    async fn error_of(response: Response) -> (StatusCode, String) {
+        let status = response.status();
+        let body = response_json(response).await;
+        (status, body["error"].as_str().unwrap_or_default().to_string())
+    }
+
+    #[tokio::test]
+    async fn queue_routes_validate_then_add_pause_retry_remove_and_clear() {
+        let home = TestHome::new();
+        let state = home.state();
+        let far = (Utc::now() + chrono::Duration::days(800)).to_rfc3339();
+        for body in [
+            json!({}),
+            json!({"topics": [" ", ""]}),
+            json!({"items": [{"topic": "  "}]}),
+            json!({"topics": ["x".repeat(1001)]}),
+            json!({"topics": ["ok"], "target_seconds": 5}),
+            json!({"topics": ["ok"], "voice": "v".repeat(129)}),
+            json!({"topics": ["ok"], "publish": {"privacy": "secret"}}),
+            json!({"topics": ["ok"], "publish": {"publish_at": far}}),
+            json!({"topics": ["ok"], "publish_every_minutes": 43_201}),
+            json!({"topics": vec!["ok"; queue::MAX_ADD + 1]}),
+        ] {
+            let response = call(&state, "POST", "/api/queue", body.clone()).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+        }
+        let response = call(
+            &state,
+            "POST",
+            "/api/queue",
+            json!({"topics": ["ok"], "publish": {"privacy": "unlisted"}}),
+        )
+        .await;
+        let (status, error) = error_of(response).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(error.contains("isn't connected"), "{error}");
+        assert!(state.queue.snapshot().items.is_empty());
+
+        let response = call(
+            &state,
+            "POST",
+            "/api/queue",
+            json!({
+                "topics": [" First ", "", "Second"],
+                "format": "square",
+                "caption_preset": "hormozi",
+                "extra_formats": ["vertical"]
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let added = response_json(response).await;
+        assert_eq!(added.as_array().unwrap().len(), 2, "blank topics are skipped");
+        assert_eq!(added[0]["topic"], "First");
+        assert_eq!(added[0]["format"], "square");
+        assert_eq!(added[0]["caption_preset"], "hormozi");
+        assert_eq!(added[0]["status"], "waiting");
+        let first = added[0]["id"].as_str().unwrap().to_string();
+
+        let response = call(&state, "PATCH", "/api/queue", json!({"paused": true})).await;
+        assert_eq!(response_json(response).await["paused"], true);
+        assert!(state.queue.is_idle(), "a paused queue is idle");
+
+        for (method, path) in [("DELETE", "/api/queue/nope"), ("POST", "/api/queue/nope/retry")] {
+            let response = call(&state, method, path, json!({})).await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
+        }
+        let response = call(&state, "POST", &format!("/api/queue/{first}/retry"), json!({})).await;
+        assert_eq!(response.status(), StatusCode::OK, "retrying a waiting item is a no-op");
+        let response = call(&state, "DELETE", &format!("/api/queue/{first}"), json!({})).await;
+        let left = response_json(response).await;
+        assert_eq!(left["items"].as_array().unwrap().len(), 1);
+        assert_eq!(left["items"][0]["topic"], "Second");
+        let response = call(&state, "POST", "/api/queue/clear", json!({})).await;
+        assert_eq!(response_json(response).await["removed"], 0, "waiting items stay");
+        assert_eq!(state.queue.snapshot().items.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn publishing_needs_a_render_a_connection_and_a_free_upload_slot() {
+        let home = TestHome::new();
+        let state = home.state();
+        let project = state.store.create(finished_project()).await.unwrap();
+        let path = format!("/api/projects/{}/publish", project.id);
+        let far = (Utc::now() + chrono::Duration::days(800)).to_rfc3339();
+        for body in [json!({"privacy": "secret"}), json!({"publish_at": far})] {
+            let response = call(&state, "POST", &path, body.clone()).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+        }
+        let response = call(&state, "POST", "/api/projects/nope/publish", json!({})).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let response = call(&state, "POST", &path, json!({"format": "square"})).await;
+        let (status, error) = error_of(response).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(error.contains("no square render"), "{error}");
+        let response = call(&state, "POST", &path, json!({"privacy": "unlisted"})).await;
+        let (status, error) = error_of(response).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(error.contains("isn't connected"), "{error}");
+
+        let mut unrendered = finished_project();
+        unrendered.render = None;
+        let unrendered = state.store.create(unrendered).await.unwrap();
+        let response = call(
+            &state,
+            "POST",
+            &format!("/api/projects/{}/publish", unrendered.id),
+            json!({}),
+        )
+        .await;
+        let (status, error) = error_of(response).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(error.contains("render the project"), "{error}");
+
+        // Connected, but the project is busy: nothing reaches Google.
+        state.publish.sign_in_for_test();
+        state.publish.set_uploading_for_test(&project.id, true);
+        let project_path = format!("/api/projects/{}", project.id);
+        for (method, path, body) in [
+            ("POST", path.as_str(), json!({})),
+            ("PATCH", project_path.as_str(), json!({"title": "Busy"})),
+            ("DELETE", project_path.as_str(), json!({})),
+        ] {
+            let response = call(&state, method, path, body).await;
+            assert_eq!(response.status(), StatusCode::CONFLICT, "{method} {path}");
+        }
+        state.publish.set_uploading_for_test(&project.id, false);
+        state
+            .store
+            .spawn_pipeline(&project.id, futures::future::pending())
+            .unwrap();
+        let response = call(&state, "POST", &path, json!({})).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        state.store.abort_and_wait(&project.id).await;
+    }
+
+    #[tokio::test]
+    async fn youtube_client_settings_validate_and_never_echo_the_secret() {
+        let home = TestHome::new();
+        let state = home.state();
+        let response = call(&state, "GET", "/api/publish/youtube", json!(null)).await;
+        let status = response_json(response).await;
+        assert_eq!(status["configured"], false);
+        assert_eq!(status["connected"], false);
+        let response = call(&state, "POST", "/api/publish/youtube/connect", json!({})).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "needs a client first");
+
+        for body in [
+            json!({}),
+            json!({"client_id": "only-an-id"}),
+            json!({"client_json": "{not json"}),
+            json!({"client_json": r#"{"web":{"client_id":"a","client_secret":"b"}}"#}),
+        ] {
+            let response = call(&state, "PUT", "/api/publish/youtube", body.clone()).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+        }
+        assert!(!state.publish.status().configured);
+        let client = r#"{"installed":{"client_id":"cid.apps.googleusercontent.com","client_secret":"fixture-client-secret"}}"#;
+        let response = call(
+            &state,
+            "PUT",
+            "/api/publish/youtube",
+            json!({"client_json": client}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let status = response_json(response).await;
+        assert!(!status.to_string().contains("fixture-client-secret"));
+        assert_eq!(status["configured"], true);
+        assert_eq!(status["connected"], false);
+        assert_eq!(status["client_id"], "cid.apps.googleusercontent.com");
+
+        for url in ["x".repeat(8193), "not a url".into()] {
+            let response = call(
+                &state,
+                "POST",
+                "/api/publish/youtube/callback-url",
+                json!({"url": url}),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        let response = call(&state, "DELETE", "/api/publish/youtube", json!(null)).await;
+        assert_eq!(response_json(response).await["configured"], true, "keeps the client");
+        let response = call(&state, "DELETE", "/api/publish/youtube?all=true", json!(null)).await;
+        assert_eq!(response_json(response).await["configured"], false);
+    }
+
+    #[tokio::test]
+    async fn ideas_and_clip_requests_are_checked_before_any_network_call() {
+        let home = TestHome::new();
+        let state = home.state();
+        let long_q = "q".repeat(201);
+        for query in ["geo=USA", "geo=1x", "source=nope", &format!("source=news&q={long_q}")] {
+            let response = call(&state, "GET", &format!("/api/ideas?{query}"), json!(null)).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+        }
+        let url = "https://www.youtube.com/watch?v=abc";
+        for body in [
+            json!({"url": " "}),
+            json!({"url": "ftp://example.com/video"}),
+            json!({"url": format!("https://{}", "x".repeat(2000))}),
+            json!({"url": url, "count": 0}),
+            json!({"url": url, "count": clips::MAX_CLIPS + 1}),
+            json!({"url": url, "min_s": 4}),
+            json!({"url": url, "max_s": 181}),
+            json!({"url": url, "min_s": 50, "max_s": 40}),
+            json!({"url": url, "start": false, "publish": {"privacy": "public"}}),
+            json!({"url": url, "publish": {"privacy": "secret"}}),
+            json!({"url": url, "publish_every_minutes": 43_201}),
+            json!({"url": url, "job": "not a job id"}),
+            json!({"url": url, "job": ""}),
+        ] {
+            let response = call(&state, "POST", "/api/clips", body.clone()).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+        }
+        let response = call(
+            &state,
+            "POST",
+            "/api/clips",
+            json!({"url": url, "publish": {"privacy": "public"}}),
+        )
+        .await;
+        let (status, error) = error_of(response).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(error.contains("isn't connected"), "{error}");
+        assert!(state.store.list().is_empty());
+    }
+
+    #[tokio::test]
+    async fn clips_keep_their_source_footage_and_narration() {
+        let home = TestHome::new();
+        let state = home.state();
+        let clip = state.store.create(clip_project()).await.unwrap();
+        let path = format!("/api/projects/{}", clip.id);
+        for (method, tail, body) in [
+            ("PATCH", "", json!({"script_text": "New words."})),
+            ("PATCH", "", json!({"topic": "Another topic"})),
+            ("PATCH", "", json!({"target_seconds": 15})),
+            ("PATCH", "/beats/b01", json!({"text": "New words."})),
+            ("POST", "/beats/b01/search", json!({})),
+            ("POST", "/beats/b01/auto", json!({})),
+        ] {
+            let response = call(&state, method, &format!("{path}{tail}"), body).await;
+            let (status, error) = error_of(response).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{method} {tail}");
+            assert!(error.contains("clip"), "{error}");
+        }
+        let response = call(
+            &state,
+            "PATCH",
+            &path,
+            json!({"title": "A better title", "caption_preset": "karaoke"}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "metadata and styling stay editable");
+        let saved = state.store.get(&clip.id).unwrap();
+        assert_eq!(saved.caption_preset, Some(CaptionPreset::Karaoke));
+        assert_eq!(saved.script.as_ref().unwrap().title, "A better title");
+
+        let response = call(&state, "POST", &format!("{path}/duplicate"), json!({})).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let copy = state
+            .store
+            .get(response_json(response).await["id"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(copy.kind, ProjectKind::Clip);
+        assert_eq!(copy.clip.as_ref().unwrap().start_s, 100.0);
+        assert_eq!(copy.caption_preset, Some(CaptionPreset::Karaoke));
+        assert_eq!(copy.beats.len(), 1);
+        assert!(copy.beats[0].asset.is_none());
+        assert_eq!(pipeline::first_unfinished(&copy), Some(Stage::Assets));
+
+        let response = call(&state, "PATCH", &path, json!({"title": "Kept style"})).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let saved = state.store.get(&clip.id).unwrap();
+        assert_eq!(saved.caption_preset, Some(CaptionPreset::Karaoke), "left out keeps it");
+        let response = call(&state, "PATCH", &path, json!({"caption_preset": null})).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let saved = state.store.get(&clip.id).unwrap();
+        assert_eq!(saved.caption_preset, None, "null goes back to the default");
+    }
+
+    #[tokio::test]
+    async fn extra_formats_are_cleaned_and_each_render_file_downloads() {
+        assert_eq!(
+            clean_extra_formats(
+                Format::Vertical,
+                vec![Format::Vertical, Format::Square, Format::Square, Format::Horizontal],
+            ),
+            [Format::Square, Format::Horizontal]
+        );
+        let home = TestHome::new();
+        let state = home.state();
+        let project = state.store.create(finished_project()).await.unwrap();
+        let path = format!("/api/projects/{}", project.id);
+        let response = call(
+            &state,
+            "PATCH",
+            &path,
+            json!({"extra_formats": ["vertical", "square", "square"]}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let saved = state.store.get(&project.id).unwrap();
+        assert_eq!(saved.extra_formats, [Format::Square]);
+        assert!(saved.render.is_none(), "a new format needs a new render");
+        let response = call(&state, "PATCH", &path, json!({"format": "square"})).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let saved = state.store.get(&project.id).unwrap();
+        assert!(saved.extra_formats.is_empty(), "the main format isn't an extra");
+
+        let mut project = finished_project();
+        project.extra_formats = vec![Format::Square];
+        project.render = serde_json::from_value(json!({
+            "path": "render/final.mp4", "credits_path": "render/credits.txt",
+            "duration_s": 1.5, "width": 1080, "height": 1920, "rendered_at": Utc::now(),
+            "variants": [{"format": "square", "path": "render/final-square.mp4",
+                          "width": 1080, "height": 1080}],
+            "subtitles": {"srt": "render/captions.srt", "vtt": "render/captions.vtt"},
+            "thumbnail_jpg": "render/thumbnail.jpg"
+        }))
+        .unwrap();
+        let project = state.store.create(project).await.unwrap();
+        let render = state.store.dir(&project.id).join("render");
+        std::fs::create_dir_all(&render).unwrap();
+        for file in [
+            "final.mp4",
+            "final-square.mp4",
+            "captions.srt",
+            "captions.vtt",
+            "thumbnail.jpg",
+            "credits.txt",
+        ] {
+            std::fs::write(render.join(file), file).unwrap();
+        }
+        let download = format!("/api/projects/{}/download", project.id);
+        for (file, name, body) in [
+            ("", "a-fixture-topic.mp4", "final.mp4"),
+            ("?file=vertical", "a-fixture-topic.mp4", "final.mp4"),
+            ("?file=square", "a-fixture-topic-square.mp4", "final-square.mp4"),
+            ("?file=srt", "a-fixture-topic.srt", "captions.srt"),
+            ("?file=vtt", "a-fixture-topic.vtt", "captions.vtt"),
+            ("?file=thumb", "a-fixture-topic-thumbnail.jpg", "thumbnail.jpg"),
+            ("?file=credits", "a-fixture-topic-credits.txt", "credits.txt"),
+        ] {
+            let response = call(&state, "GET", &format!("{download}{file}"), json!(null)).await;
+            assert_eq!(response.status(), StatusCode::OK, "{file}");
+            let disposition = response.headers()[header::CONTENT_DISPOSITION]
+                .to_str()
+                .unwrap()
+                .to_string();
+            assert!(disposition.contains(name), "{file}: {disposition}");
+            let bytes = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            assert_eq!(&bytes[..], body.as_bytes());
+        }
+        let response = call(&state, "GET", &format!("{download}?file=horizontal"), json!(null)).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let response = call(&state, "GET", &format!("{download}?file=passwd"), json!(null)).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

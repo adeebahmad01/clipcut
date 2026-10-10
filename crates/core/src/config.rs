@@ -3,6 +3,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::timeline::CaptionPreset;
+
 /// `config.toml` in the ClipCut home. Missing fields use their defaults;
 /// explicitly configured values are checked by `validate`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -15,6 +17,7 @@ pub struct Config {
     pub youtube: YoutubeConfig,
     pub tts: TtsConfig,
     pub audio: AudioConfig,
+    pub publish: PublishConfig,
     /// Executable overrides by tool name: ffmpeg, ffprobe, yt-dlp, chromium,
     /// claude, codex, espeak-ng, podman.
     pub tools: BTreeMap<String, String>,
@@ -72,13 +75,36 @@ pub enum Format {
     Vertical,
     /// 1920x1080 long-form
     Horizontal,
+    /// 1080x1080 feed posts
+    Square,
 }
 
 impl Format {
+    pub const ALL: [Format; 3] = [Format::Vertical, Format::Horizontal, Format::Square];
+
     pub fn size(self) -> (u32, u32) {
         match self {
             Format::Vertical => (1080, 1920),
             Format::Horizontal => (1920, 1080),
+            Format::Square => (1080, 1080),
+        }
+    }
+
+    /// snake_case name, as used in serde and in variant file names.
+    pub fn slug(self) -> &'static str {
+        match self {
+            Format::Vertical => "vertical",
+            Format::Horizontal => "horizontal",
+            Format::Square => "square",
+        }
+    }
+
+    /// Width:height, for labels.
+    pub fn ratio(self) -> &'static str {
+        match self {
+            Format::Vertical => "9:16",
+            Format::Horizontal => "16:9",
+            Format::Square => "1:1",
         }
     }
 }
@@ -92,6 +118,8 @@ pub struct VideoConfig {
     pub min_clip_seconds: f32,
     pub max_clip_seconds: f32,
     pub captions: bool,
+    /// Caption look for new projects: pop, hormozi, mrbeast, minimal, karaoke.
+    pub caption_preset: CaptionPreset,
     /// x264 CRF (lower = better quality, bigger file).
     pub crf: u8,
 }
@@ -105,10 +133,31 @@ impl Default for VideoConfig {
             min_clip_seconds: 1.0,
             max_clip_seconds: 3.0,
             captions: true,
+            caption_preset: CaptionPreset::Pop,
             crf: 20,
         }
     }
 }
+
+/// Defaults for uploads to YouTube.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PublishConfig {
+    /// private, unlisted or public.
+    pub privacy: String,
+    /// YouTube category id; 22 is People & Blogs, 24 Entertainment, 27 Education.
+    pub category_id: String,
+    /// Declare uploads as made for kids (COPPA).
+    pub made_for_kids: bool,
+}
+
+impl Default for PublishConfig {
+    fn default() -> Self {
+        Self { privacy: "private".into(), category_id: "22".into(), made_for_kids: false }
+    }
+}
+
+pub const PRIVACY_VALUES: [&str; 3] = ["private", "unlisted", "public"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -241,6 +290,15 @@ impl Config {
         finite_range("audio.voice_volume", self.audio.voice_volume, 0.0, 2.0)?;
         finite_range("audio.sfx_volume", self.audio.sfx_volume, 0.0, 2.0)?;
         finite_range("audio.music_volume", self.audio.music_volume, 0.0, 2.0)?;
+        anyhow::ensure!(
+            PRIVACY_VALUES.contains(&self.publish.privacy.as_str()),
+            "publish.privacy must be private, unlisted, or public"
+        );
+        let category = &self.publish.category_id;
+        anyhow::ensure!(
+            (1..=3).contains(&category.len()) && category.bytes().all(|b| b.is_ascii_digit()),
+            "publish.category_id must be a numeric YouTube category id such as 22"
+        );
 
         let endpoint = &self.search.searxng_url;
         anyhow::ensure!(
@@ -400,6 +458,38 @@ mod tests {
             let mut config = Config::default();
             change(&mut config);
             assert!(config.validate().unwrap_err().to_string().contains(field));
+        }
+    }
+
+    #[test]
+    fn publish_settings_are_checked() {
+        let mut config = Config::default();
+        for privacy in PRIVACY_VALUES {
+            config.publish.privacy = privacy.into();
+            config.validate().unwrap();
+        }
+        config.publish.privacy = "secret".into();
+        assert!(config.validate().unwrap_err().to_string().contains("publish.privacy"));
+        config.publish.privacy = "private".into();
+        for category in ["", "abc", "1234", "2 2"] {
+            config.publish.category_id = category.into();
+            assert!(config.validate().unwrap_err().to_string().contains("publish.category_id"));
+        }
+    }
+
+    #[test]
+    fn formats_and_presets_round_trip_through_toml() {
+        let dir = TestDir::new();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[video]\nformat = \"square\"\ncaption_preset = \"hormozi\"\n").unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.video.format, Format::Square);
+        assert_eq!(config.video.format.size(), (1080, 1080));
+        assert_eq!(config.video.caption_preset, CaptionPreset::Hormozi);
+        for format in Format::ALL {
+            let (w, h) = format.size();
+            assert!(w % 2 == 0 && h % 2 == 0);
+            assert_eq!(serde_json::to_value(format).unwrap(), format.slug());
         }
     }
 
