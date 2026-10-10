@@ -49,6 +49,19 @@ impl Progress {
         Self { stage: Some(stage), ..self.clone() }
     }
 
+    /// A view whose fractions land in `start..start + len` of this one, for
+    /// stages that run several long steps in a row.
+    pub fn span(&self, start: f32, len: f32) -> Self {
+        let sink = self.sink.clone();
+        Self {
+            sink: Arc::new(move |mut e: ProgressEvent| {
+                e.progress = e.progress.map(|p| (start + p * len).clamp(0.0, 1.0));
+                sink(e)
+            }),
+            ..self.clone()
+        }
+    }
+
     fn emit(&self, beat_id: Option<&str>, progress: Option<f32>, level: Level, message: String) {
         (self.sink)(ProgressEvent {
             project_id: self.project_id.clone(),

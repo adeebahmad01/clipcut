@@ -13,8 +13,8 @@ use resvg::tiny_skia::{
 use resvg::usvg;
 
 use clipcut_core::timeline::{
-    Align, Anim, AnimKind, CardStyle, Fit, FontKind, Layer, LayerContent, Motion, RectF, Rgba,
-    TextStyle, Timeline,
+    Align, Anim, AnimKind, CaptionPreset, CardStyle, Fit, FontKind, Layer, LayerContent, Motion,
+    RectF, Rgba, TextStyle, Timeline,
 };
 
 use crate::control::Control;
@@ -623,8 +623,23 @@ impl Scene {
         let cy = style.y * self.h as f32;
         let baseline = cy + size * face.cap / 2.0;
         let cx = self.w as f32 / 2.0;
-        let gp = clamp01((t - g.start) / 0.13);
-        let gs = 0.8 + 0.2 * ease::out_back(gp);
+        let preset = style.preset;
+        // Group entrance: pop in, or a plain fade for the minimal look.
+        let (gs, alpha) = match preset {
+            CaptionPreset::Minimal => (1.0, clamp01((t - g.start) / 0.12)),
+            CaptionPreset::Mrbeast => {
+                let gp = clamp01((t - g.start) / 0.16);
+                (0.55 + 0.45 * ease::out_back(gp), 1.0)
+            }
+            CaptionPreset::Hormozi | CaptionPreset::Karaoke => {
+                let gp = clamp01((t - g.start) / 0.12);
+                (0.9 + 0.1 * ease::out_back(gp), 1.0)
+            }
+            CaptionPreset::Pop => {
+                let gp = clamp01((t - g.start) / 0.13);
+                (0.8 + 0.2 * ease::out_back(gp), 1.0)
+            }
+        };
         let group_t = Transform::from_translate(cx, cy)
             .pre_scale(gs, gs)
             .pre_translate(-cx, -cy);
@@ -632,49 +647,169 @@ impl Scene {
             let word = &self.tl.captions[wi];
             word.start_s <= t && t < word.end_s
         });
-        let stroke_w = size * 0.12;
+        let stroke_w = size
+            * match preset {
+                CaptionPreset::Pop => 0.12,
+                CaptionPreset::Hormozi => 0.1,
+                CaptionPreset::Mrbeast => 0.22,
+                CaptionPreset::Minimal => 0.0,
+                CaptionPreset::Karaoke => 0.09,
+            };
+        // MrBeast-style captions cycle the spoken word through bright colors.
+        let cycle = [
+            style.accent,
+            style.emphasis_color.unwrap_or(style.accent),
+            Rgba(90, 255, 120, 255),
+        ];
         let mut x = cx - total / 2.0;
-        let mut items = Vec::new();
+        let mut items: Vec<CapItem> = Vec::new();
         for (k, &wi) in g.words.iter().enumerate() {
             let cw = &self.tl.captions[wi];
             let wcx = x + widths[k] / 2.0;
             let is_active = Some(k) == active;
-            let mut ws = if cw.emphasis { 1.06 } else { 1.0 };
-            if is_active {
-                let lt = t - cw.start_s;
-                ws *= if lt < 0.07 {
-                    lerp(1.0, 1.17, lt / 0.07)
-                } else {
-                    lerp(1.17, 1.1, clamp01((lt - 0.07) / 0.1))
-                };
-            }
-            let col = if is_active {
-                style.accent
-            } else if cw.emphasis {
-                style.emphasis_color.unwrap_or(style.color)
-            } else {
-                style.color
+            let lt = t - cw.start_s;
+            let ws = match preset {
+                CaptionPreset::Pop => {
+                    let base = if cw.emphasis { 1.06 } else { 1.0 };
+                    base * if !is_active {
+                        1.0
+                    } else if lt < 0.07 {
+                        lerp(1.0, 1.17, lt / 0.07)
+                    } else {
+                        lerp(1.17, 1.1, clamp01((lt - 0.07) / 0.1))
+                    }
+                }
+                CaptionPreset::Hormozi if is_active => lerp(1.0, 1.06, clamp01(lt / 0.08)),
+                CaptionPreset::Mrbeast if is_active => {
+                    if lt < 0.07 {
+                        lerp(1.0, 1.28, lt / 0.07)
+                    } else {
+                        lerp(1.28, 1.16, clamp01((lt - 0.07) / 0.12))
+                    }
+                }
+                _ => 1.0,
+            };
+            let emphasis = style.emphasis_color.unwrap_or(style.color);
+            let fill = match preset {
+                CaptionPreset::Pop if is_active => CapFill::Solid(style.accent),
+                CaptionPreset::Hormozi if is_active => CapFill::Solid(Rgba(14, 14, 14, 255)),
+                CaptionPreset::Mrbeast if is_active => CapFill::Solid(cycle[wi % cycle.len()]),
+                CaptionPreset::Pop | CaptionPreset::Hormozi | CaptionPreset::Mrbeast if cw.emphasis => {
+                    CapFill::Solid(emphasis)
+                }
+                CaptionPreset::Minimal => CapFill::Solid(style.color),
+                CaptionPreset::Karaoke if cw.end_s <= t => CapFill::Solid(style.accent),
+                CaptionPreset::Karaoke if is_active => CapFill::Wipe {
+                    x0: x,
+                    x1: x + widths[k],
+                    p: clamp01(lt / (cw.end_s - cw.start_s).max(0.05)),
+                },
+                CaptionPreset::Karaoke => CapFill::Dim,
+                _ => CapFill::Solid(style.color),
             };
             let wt = group_t
                 .pre_translate(wcx, cy)
                 .pre_scale(ws, ws)
                 .pre_translate(-wcx, -cy);
+            let boxed = (preset == CaptionPreset::Hormozi && is_active)
+                .then(|| {
+                    let (pad_x, pad_y) = (size * 0.16, size * 0.14);
+                    let cap = size * face.cap;
+                    rounded_rect(
+                        x - pad_x,
+                        baseline - cap - pad_y,
+                        widths[k] + pad_x * 2.0,
+                        cap + pad_y * 2.0,
+                        size * 0.16,
+                    )
+                })
+                .flatten();
             if let Some(path) = face.path(&words[k], size, x, baseline) {
-                items.push((is_active, path, wt, col));
+                items.push(CapItem {
+                    top: is_active,
+                    path,
+                    t: wt,
+                    fill,
+                    boxed,
+                });
             }
             x += widths[k] + space(size);
         }
         // Inactive words first, the active (scaled) word on top.
-        items.sort_by_key(|i| i.0);
-        let shadow = paint(sk::Color::from_rgba8(0, 0, 0, 120));
-        let stroke_paint = paint(color(style.stroke));
-        for (_, path, wt, col) in &items {
-            let st = wt.pre_translate(0.0, size * 0.07);
-            fb.stroke_path(path, &shadow, &text::stroke(stroke_w), st, None);
-            fb.stroke_path(path, &stroke_paint, &text::stroke(stroke_w), *wt, None);
-            fb.fill_path(path, &paint(color(*col)), sk::FillRule::Winding, *wt, None);
+        items.sort_by_key(|i| i.top);
+        let stroke_paint = paint(color_alpha(style.stroke, alpha));
+        for item in &items {
+            let wt = item.t;
+            if let Some(b) = &item.boxed {
+                let st = wt.pre_translate(0.0, size * 0.06);
+                fb.fill_path(b, &paint(sk::Color::from_rgba8(0, 0, 0, 110)), sk::FillRule::Winding, st, None);
+                fb.fill_path(b, &paint(color(style.accent)), sk::FillRule::Winding, wt, None);
+            }
+            if preset == CaptionPreset::Minimal {
+                // A soft two-step shadow instead of an outline.
+                let soft = paint(color_alpha(Rgba(0, 0, 0, 70), alpha));
+                for dy in [0.035, 0.07] {
+                    let st = wt.pre_translate(0.0, size * dy);
+                    fb.fill_path(&item.path, &soft, sk::FillRule::Winding, st, None);
+                }
+            } else if item.boxed.is_none() {
+                let shadow = paint(sk::Color::from_rgba8(0, 0, 0, 120));
+                let drop = if preset == CaptionPreset::Mrbeast { 0.1 } else { 0.07 };
+                let st = wt.pre_translate(0.0, size * drop);
+                fb.stroke_path(&item.path, &shadow, &text::stroke(stroke_w), st, None);
+                fb.stroke_path(&item.path, &stroke_paint, &text::stroke(stroke_w), wt, None);
+            }
+            let dim = color_alpha(style.color, 0.45 * alpha);
+            let fill_paint = match item.fill {
+                CapFill::Solid(c) => paint(color_alpha(c, alpha)),
+                CapFill::Dim => paint(dim),
+                CapFill::Wipe { x0, x1, p } => {
+                    let edge = lerp(x0, x1, p);
+                    let stops = vec![
+                        GradientStop::new(0.0, color(style.accent)),
+                        GradientStop::new(0.5, color(style.accent)),
+                        GradientStop::new(0.5, dim),
+                        GradientStop::new(1.0, dim),
+                    ];
+                    // A hard edge at `edge`: the gradient spans one pixel there.
+                    match LinearGradient::new(
+                        Point::from_xy(edge - 0.5, 0.0),
+                        Point::from_xy(edge + 0.5, 0.0),
+                        stops,
+                        SpreadMode::Pad,
+                        Transform::identity(),
+                    ) {
+                        Some(shader) => sk::Paint {
+                            shader,
+                            anti_alias: true,
+                            ..sk::Paint::default()
+                        },
+                        None => paint(color(style.accent)),
+                    }
+                }
+            };
+            fb.fill_path(&item.path, &fill_paint, sk::FillRule::Winding, wt, None);
         }
     }
+}
+
+/// One caption word ready to paint.
+struct CapItem {
+    top: bool,
+    path: sk::Path,
+    t: Transform,
+    fill: CapFill,
+    /// Hormozi box behind the spoken word.
+    boxed: Option<sk::Path>,
+}
+
+#[derive(Clone, Copy)]
+enum CapFill {
+    Solid(Rgba),
+    /// Not yet spoken (karaoke).
+    Dim,
+    /// Spoken part on the left of `x0..x1` in the accent color.
+    Wipe { x0: f32, x1: f32, p: f32 },
 }
 
 fn paint_c(c: Rgba) -> sk::Paint<'static> {
@@ -925,7 +1060,7 @@ pub fn motion_state(
     s
 }
 
-fn load_image(path: &Path) -> Option<image::RgbaImage> {
+pub(crate) fn load_image(path: &Path) -> Option<image::RgbaImage> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -1472,6 +1607,11 @@ fn render_meme(
 pub fn group_captions(tl: &Timeline) -> Vec<CapGroup> {
     let words = &tl.captions;
     let max_words = tl.caption_style.max_words.clamp(1, 6);
+    let max_chars = match tl.caption_style.preset {
+        CaptionPreset::Minimal | CaptionPreset::Karaoke => 30,
+        CaptionPreset::Mrbeast => 14,
+        CaptionPreset::Pop | CaptionPreset::Hormozi => 17,
+    };
     let mut groups: Vec<CapGroup> = Vec::new();
     let mut cur: Vec<usize> = Vec::new();
     let mut chars = 0usize;
@@ -1489,7 +1629,7 @@ pub fn group_captions(tl: &Timeline) -> Vec<CapGroup> {
         }
         if let Some(&last) = cur.last() {
             let gap = w.start_s - words[last].end_s;
-            if cur.len() >= max_words || chars + clean.chars().count() + 1 > 17 || gap > 0.45 {
+            if cur.len() >= max_words || chars + clean.chars().count() + 1 > max_chars || gap > 0.45 {
                 groups.push(CapGroup {
                     words: std::mem::take(&mut cur),
                     start: 0.0,

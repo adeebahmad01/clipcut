@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::config::Format;
-pub use crate::timeline::{RectF, SfxKind};
+pub use crate::timeline::{CaptionPreset, RectF, SfxKind};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
@@ -42,10 +42,73 @@ pub struct Project {
     pub voice_track: Option<VoiceTrack>,
     #[serde(default)]
     pub render: Option<RenderOutput>,
+    /// Caption look; `None` uses `video.caption_preset`.
+    #[serde(default)]
+    pub caption_preset: Option<CaptionPreset>,
+    /// More aspect ratios rendered from the same edit, besides `format`.
+    #[serde(default)]
+    pub extra_formats: Vec<Format>,
+    #[serde(default)]
+    pub published: Vec<PublishRecord>,
+    #[serde(default)]
+    pub kind: ProjectKind,
+    /// The long video a clip project was cut from.
+    #[serde(default)]
+    pub clip: Option<ClipSource>,
 }
 
 fn yes() -> bool {
     true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectKind {
+    /// Researched, scripted and narrated from a topic.
+    #[default]
+    Story,
+    /// One moment cut from a long video, with its own audio.
+    Clip,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClipSource {
+    /// Watch URL of the long video.
+    pub url: String,
+    pub video_id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub channel: String,
+    /// Length of the whole source video.
+    #[serde(default)]
+    pub duration_s: f32,
+    /// The moment, in source seconds.
+    pub start_s: f32,
+    pub end_s: f32,
+    /// Overlay shown at the start of the clip.
+    #[serde(default)]
+    pub hook: String,
+    /// Why the moment was picked.
+    #[serde(default)]
+    pub reason: String,
+    /// The source's caption cues inside the moment, relative to `start_s`.
+    #[serde(default)]
+    pub cues: Vec<CaptionCue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishRecord {
+    /// `youtube`.
+    pub platform: String,
+    pub format: Format,
+    pub video_id: String,
+    pub url: String,
+    pub privacy: String,
+    /// Scheduled release time, when the upload is private until then.
+    #[serde(default)]
+    pub publish_at: Option<DateTime<Utc>>,
+    pub uploaded_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -372,6 +435,40 @@ pub struct RenderOutput {
     pub width: u32,
     pub height: u32,
     pub rendered_at: DateTime<Utc>,
+    /// The same edit in the project's `extra_formats`.
+    #[serde(default)]
+    pub variants: Vec<RenderVariant>,
+    #[serde(default)]
+    pub subtitles: Option<Subtitles>,
+    /// Relative path of the YouTube-sized thumbnail (1280x720 JPEG).
+    #[serde(default)]
+    pub thumbnail_jpg: Option<String>,
+}
+
+impl RenderOutput {
+    /// The rendered file for `format`, if any.
+    pub fn file_for(&self, main: Format, format: Format) -> Option<(&str, u32, u32)> {
+        if format == main {
+            return Some((&self.path, self.width, self.height));
+        }
+        self.variants.iter().find(|v| v.format == format).map(|v| (v.path.as_str(), v.width, v.height))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenderVariant {
+    pub format: Format,
+    /// Relative to the project dir, e.g. `render/final-square.mp4`.
+    pub path: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Subtitles {
+    /// Relative paths, e.g. `render/captions.srt`.
+    pub srt: String,
+    pub vtt: String,
 }
 
 impl Project {
@@ -407,7 +504,23 @@ impl Project {
             beats: Vec::new(),
             voice_track: None,
             render: None,
+            caption_preset: None,
+            extra_formats: Vec::new(),
+            published: Vec::new(),
+            kind: ProjectKind::Story,
+            clip: None,
         }
+    }
+
+    /// Every format this project renders, main first, without duplicates.
+    pub fn formats(&self) -> Vec<Format> {
+        let mut out = vec![self.format];
+        for &f in &self.extra_formats {
+            if !out.contains(&f) {
+                out.push(f);
+            }
+        }
+        out
     }
 
     pub fn stage_mut(&mut self, stage: Stage) -> &mut StageState {
@@ -445,6 +558,11 @@ impl Project {
 /// Write via a temp file + rename so a crash never leaves half a JSON file.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     crate::atomic::write(path, bytes, false)
+}
+
+/// `write_atomic` for secrets: the file is readable by its owner only.
+pub fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    crate::atomic::write(path, bytes, true)
 }
 
 fn normalize_word(word: &str) -> String {

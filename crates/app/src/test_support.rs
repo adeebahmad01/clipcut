@@ -66,6 +66,37 @@ pub fn finished_project() -> Project {
     project
 }
 
+/// A clip cut from a long video, not yet rendered.
+pub fn clip_project() -> Project {
+    let info = clipcut_sources::VideoInfo {
+        id: "abc".into(),
+        url: "https://www.youtube.com/watch?v=abc".into(),
+        title: "Long talk".into(),
+        channel: "Some Channel".into(),
+        duration_s: 600.0,
+    };
+    let cues = [clipcut_core::model::CaptionCue {
+        start_s: 100.0,
+        end_s: 104.0,
+        text: "first line".into(),
+    }];
+    let moment = crate::clips::ClipMoment {
+        start_s: 100.0,
+        end_s: 140.0,
+        title: "".into(),
+        hook: "Wait for it".into(),
+        reason: "payoff".into(),
+    };
+    crate::clips::build_project(
+        &info,
+        &cues,
+        moment,
+        clipcut_core::config::Format::Vertical,
+        Vec::new(),
+        None,
+    )
+}
+
 pub fn text_beat() -> Beat {
     serde_json::from_value(serde_json::json!({
         "id": "b01", "text": "One fixture sentence.",

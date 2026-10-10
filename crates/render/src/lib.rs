@@ -12,6 +12,7 @@ mod ffmpeg;
 mod pipeline;
 mod scene;
 mod text;
+mod thumbnail;
 mod util;
 
 use std::path::Path;
@@ -101,6 +102,38 @@ impl Renderer {
         let (tl, out) = (timeline.clone(), out_png.to_path_buf());
         tokio::task::spawn_blocking(move || {
             pipeline::still(&tl, ffmpeg.as_deref(), at_s, &out, &control)
+        })
+        .await?
+    }
+
+    /// Designed cover: best beat visual, focus-cropped, hook in the accent
+    /// color. `out_png` is the video's size; `out_jpg` is 1280x720 for upload.
+    pub async fn thumbnail(
+        &self,
+        project: &Project,
+        project_dir: &Path,
+        timeline: &Timeline,
+        out_png: &Path,
+        out_jpg: &Path,
+    ) -> anyhow::Result<()> {
+        let (ffmpeg, ffprobe) = (self.tools.ffmpeg.clone(), self.tools.ffprobe.clone());
+        let control = std::sync::Arc::new(control::Control::default());
+        let _cancel = control::CancelOnDrop(control.clone());
+        let (project, dir) = (project.clone(), project_dir.to_path_buf());
+        let (accent, size) = (timeline.caption_style.accent, (timeline.width, timeline.height));
+        let (png, jpg) = (out_png.to_path_buf(), out_jpg.to_path_buf());
+        tokio::task::spawn_blocking(move || {
+            thumbnail::render(
+                &project,
+                &dir,
+                ffmpeg.as_deref(),
+                ffprobe.as_deref(),
+                accent,
+                size,
+                &png,
+                &jpg,
+                &control,
+            )
         })
         .await?
     }
