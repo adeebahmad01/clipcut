@@ -4,6 +4,10 @@
 - [Make a video](#make-a-video)
 - [The stages](#the-stages)
 - [Reviewing and editing](#reviewing-and-editing)
+- [Captions, formats and thumbnails](#captions-formats-and-thumbnails)
+- [Clip a long video](#clip-a-long-video)
+- [The queue](#the-queue)
+- [Publish to YouTube](#publish-to-youtube)
 - [The command line](#the-command-line)
 - [Projects on disk](#projects-on-disk)
 - [Sound effects and music](#sound-effects-and-music)
@@ -35,15 +39,27 @@ still needs attention. **Settings → Setup** has the same checks as
 
 1. Type a topic, for example *Why coffee is technically a fruit*.
 2. Optionally add **Notes**: an angle, facts to include, a tone.
-3. Pick **9:16** (1080×1920, for Shorts, Reels and TikTok) or **16:9**
-   (1920×1080), a length, and a voice. **Preview** plays the voice.
+3. Pick **9:16** (1080×1920, for Shorts, Reels and TikTok), **16:9**
+   (1920×1080) or **1:1** (1080×1080, for feeds), a length, a voice and a
+   caption style. **Preview** plays the voice. Tick **Also export** to get
+   the other shapes from the same edit.
 4. Leave **Autopilot** off to review each stage, or turn it on to go
    straight to a finished video.
 5. Press **Make**.
 
-When the render finishes, the project page shows the video, a title,
-description and hashtags with copy buttons, **Download MP4**, and
-**Credits**, a list of every clip and image used and where it came from.
+When the render finishes, the project page shows the video and a
+**Ready to post** kit:
+
+- the title, description and hashtags, each with a copy button, and
+  **Copy all**,
+- **Download MP4**, plus one button per extra format,
+- **SRT** and **VTT** caption files,
+- **Thumbnail**, a 1280×720 JPEG,
+- **Credits**, a list of every clip and image used and where it came from,
+- **Publish to YouTube**, once you [connect a channel](#publish-to-youtube).
+
+Not sure what to make? **Need an idea?** under the topic box lists what is
+trending on Google Trends or in the news. Click one to use it as the topic.
 
 ## The stages
 
@@ -71,6 +87,167 @@ With Autopilot off, ClipCut stops after Hook, Script and Beat sheet. You can:
 the first one. **Re-render** only redoes the final render, which is useful
 after changing audio or caption settings.
 
+## Captions, formats and thumbnails
+
+### Caption styles
+
+| Style | Look |
+|---|---|
+| Pop (default) | Heavy uppercase, three words at a time; the spoken word pops in the accent color |
+| Hormozi | Condensed uppercase with a bright box behind the spoken word |
+| MrBeast | Two huge words at a time, thick outline, bouncing colors |
+| Minimal | Small lowercase text with a soft shadow, no motion |
+| Karaoke | A longer line that fills in word by word as it is spoken |
+
+Pick a style when you make a video, or change it later under **Project
+details → Captions**. **Settings → Preferences → Caption style** sets the
+default for new projects (`video.caption_preset` in
+[config.toml](Configuration.md#video)). Changing a project's style resets
+the Render stage, so continue the pipeline or press **Re-render** to see it.
+
+### Formats
+
+Each project has a main format and can export the other two from the same
+edit. ClipCut lays out every beat, caption and card again for each shape
+rather than cropping the finished video, so nothing important falls off the
+edge. Set them with **Also export** when you make the video or under
+**Project details**. The main video is `render/final.mp4`; the others are
+`render/final-horizontal.mp4`, `render/final-square.mp4` and so on. If an
+extra format fails to render, the main video is kept.
+
+### Caption files and thumbnail
+
+Every render also writes:
+
+- `render/captions.srt` and `render/captions.vtt`, timed to the voiceover,
+  for YouTube, editors such as Premiere and Resolve, or the web,
+- `render/thumb.jpg`, a 1280×720 thumbnail: the best photo or video frame
+  from the beats, cropped around its subject, with the hook in large type.
+  Without a usable image it uses a gradient background.
+
+The thumbnail is made fresh on every render.
+
+## Clip a long video
+
+Switch the home page to **Clip a long video**, paste a YouTube link and
+press **Find clips**. ClipCut reads the video's English captions, asks
+Claude for the strongest self-contained moments (no intros, sponsor reads
+or outros), and turns each one into its own project. If Claude can't pick,
+ClipCut falls back to the stretches where the most is said.
+
+| Option | Default | Range |
+|---|---|---|
+| How many clips | 3 | 1–5 |
+| Length | 30–60 s | 15–30, 30–60 or 45–90 s in the app; 5–180 s from the command line |
+
+Each clip keeps the original audio and its speaker. A wide video in a tall
+frame sits in a band over a blurred copy of itself, with the hook above and
+captions below; cuts punch in on new sentences with a sound effect. Clips
+get no music bed. The clips go into the [queue](#the-queue) and render one
+after another.
+
+A clip's script comes from the source video, so you can't edit its topic,
+hook, script or beats. You can still change its format, caption style and
+extra exports. The video needs English captions, auto-generated ones
+included.
+
+## The queue
+
+The **Queue** page makes many videos one after another, each on
+Autopilot. Paste topics into the box, one per line (blank lines and lines
+starting with `#` are skipped, up to 200 at a time), pick the format,
+length, voice, caption style and extra exports for the batch, and press
+**Queue N videos**. **Need an idea?** works here too and adds the topic as a
+new line.
+
+- Videos are made one at a time, in order. A failure is recorded on that
+  item and the queue moves on.
+- **Pause** stops new videos from starting; the current one finishes.
+- **Stop** (✕ on a running item) cancels it. **Retry** on a failed or
+  cancelled item puts it back in line and picks up from the stage that
+  stopped, so finished work is not redone.
+- **Clear finished** removes done, failed and cancelled items.
+- The queue is saved in `<home>/queue.json`. If ClipCut is closed while a
+  video is being made, that video starts again where it left off on the
+  next start.
+
+With YouTube connected, the queue can [publish](#publish-to-youtube) each
+video when it renders. Set a privacy, an optional first release time, and
+**then every N h** to space the rest out. Without a first release time the
+first video goes out as soon as it renders and the next ones are spaced from
+the moment you queued them.
+
+## Publish to YouTube
+
+ClipCut uploads with your own free Google Cloud OAuth client, so no
+ClipCut account or paid key is involved and the secret stays on your
+computer.
+
+### Connect a channel (once, about 10 minutes)
+
+1. [Create a Google Cloud project](https://console.cloud.google.com/projectcreate).
+   Any name works and no billing account is needed.
+2. [Enable the YouTube Data API v3](https://console.cloud.google.com/apis/library/youtube.googleapis.com)
+   for it.
+3. Set up the [OAuth consent screen](https://console.cloud.google.com/apis/credentials/consent):
+   choose **External**, then add your own Google account under **Test
+   users**.
+4. Under [Credentials](https://console.cloud.google.com/apis/credentials),
+   pick **Create credentials → OAuth client ID → Desktop app** and download
+   the JSON. A *Web application* client does not work.
+5. In ClipCut, open **Settings → YouTube**, paste the JSON or choose the
+   file, save it, and press **Connect YouTube**. Sign in with the Google
+   account that owns your channel and allow every permission.
+
+From the command line:
+
+```bash
+clipcut publish --client client_secret_1234.json --connect
+```
+
+Google sends the browser back to an `http://127.0.0.1:…` address, which
+only loads on the computer running ClipCut. If you are using ClipCut from
+another device, that page fails to load: copy its full address from the
+address bar and paste it into **Signing in from another device?** in
+Settings (or into the terminal for `--connect`).
+
+The client and the sign-in are kept in `<home>/youtube-oauth.json`, readable
+only by you. **Disconnect** signs out and revokes ClipCut's access;
+**Forget client** also deletes the saved client.
+
+### Publish a video
+
+Once connected, the **Ready to post** kit has a **Publish to YouTube**
+section. It uses the kit's title, description and hashtags, and adds a
+credits list of every source to the description.
+
+- **Privacy:** Public, Unlisted or Private.
+- **Release time:** leave it empty to publish now, or pick a time to
+  schedule. Scheduled videos upload as private and go public at that time.
+  YouTube can't schedule unlisted videos, so an unlisted video with a
+  release time goes public at that time; private videos ignore it.
+- **Format:** which render to upload, when the project has more than one.
+
+Vertical and square videos up to 3 minutes become Shorts. Longer videos and
+16:9 videos also get the thumbnail. Each upload is listed under the kit
+with its link. Publishing the same render again uploads a second copy.
+
+### What Google allows
+
+- **Uploads stay private until Google audits your project.** YouTube locks
+  videos uploaded through an unaudited API project to private. Request the
+  free [API compliance audit](https://support.google.com/youtube/contact/yt_api_form)
+  to publish publicly or on a schedule.
+- **Test sign-ins last 7 days.** While the consent screen is in *Testing*,
+  reconnect once a week, or publish the consent screen to production and
+  click through the "unverified app" warning.
+- **About 6 uploads a day.** The free quota is 10,000 units a day and each
+  upload costs about 1,600. It resets at midnight Pacific time.
+- **Custom thumbnails need a [verified channel](https://www.youtube.com/verify).**
+
+TikTok isn't supported: its posting API only lets unaudited apps post
+privately. Download the 9:16 MP4 and upload it in the TikTok app.
+
 ## The command line
 
 Everything in the app is also available without the UI:
@@ -78,9 +255,45 @@ Everything in the app is also available without the UI:
 ```bash
 clipcut new "How Australia lost the Great Emu War" --seconds 40
 clipcut new "Quantum computers in 60 seconds" --horizontal --voice bf_emma --notes "no jargon"
+clipcut new "The loudest sound ever recorded" --captions hormozi --also horizontal,square
 ```
 
 `new` runs every stage with no pauses and prints the path of `final.mp4`.
+`new`, `batch` and `clip` share these options:
+
+| Option | Effect |
+|---|---|
+| `--format vertical\|horizontal\|square` | Main format (`--horizontal` is a shortcut) |
+| `--captions pop\|hormozi\|mrbeast\|minimal\|karaoke` | Caption style |
+| `--also horizontal,square` | Also export these formats from the same edit |
+
+Make several videos, cut clips from a long video, and find topics:
+
+```bash
+clipcut batch topics.txt --seconds 45          # one video per line, one after another
+clipcut clip "https://youtu.be/…" --count 3 --min 30 --max 60
+clipcut ideas                                  # what's trending on Google Trends (--geo GB for another country)
+clipcut ideas --news --q "space"               # news headlines, optionally about something
+```
+
+If the app is running, `batch` and `clip` add their videos to its queue and
+return right away; follow them on the Queue page. Otherwise they make the
+videos in the terminal and print a `[done]` or `[failed]` line for each.
+
+Publish to YouTube (see [Publish to YouTube](#publish-to-youtube) for the
+one-time setup):
+
+```bash
+clipcut publish --client client_secret.json --connect   # save the OAuth client and sign in
+clipcut publish <project-id>                             # upload now, public
+clipcut publish <project-id> --privacy unlisted --format square
+clipcut publish <project-id> --at "2026-10-12 15:00"     # schedule (local time or RFC 3339)
+clipcut publish --disconnect                             # sign out
+clipcut batch topics.txt --publish public --start "2026-10-12 15:00" --every 1d
+```
+
+`--publish` on `batch` and `clip` uploads each video as it renders, and
+`--every` (`90m`, `2h`, `1d`) spaces the release times.
 
 ```bash
 clipcut run <project-id> --from script        # redo script and everything after it
@@ -103,14 +316,21 @@ Each project is a folder in `<home>/projects/<id>/` (`<home>` is
 on macOS):
 
 ```
-project.json        topic, settings, research, hooks, script, beat sheet and stage state
+project.json        topic, settings, research, hooks, script, beat sheet, stage state and YouTube uploads
 assets/             downloaded clips, screenshots, memes and GIFs, each with a .source.json
 voice/              the voiceover and its word timings
 render/final.mp4    the video
+render/final-*.mp4  extra formats (final-horizontal.mp4, final-square.mp4…)
+render/captions.srt caption files, also captions.vtt
+render/thumb.jpg    the 1280×720 thumbnail (thumb.png is the full-size cover)
 render/credits.txt  every source used
 ```
 
 You can delete a project from the app, or just remove its folder.
+
+Next to `projects/`, `queue.json` holds the [queue](#the-queue) and
+`youtube-oauth.json` the [YouTube](#publish-to-youtube) client and
+sign-in.
 
 ## Sound effects and music
 
