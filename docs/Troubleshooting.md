@@ -101,7 +101,60 @@ Install Chromium, Chrome, Edge or Brave. If it is not found, set
 
 **The render is slow.**
 Rendering runs on the CPU. Lower `video.fps` to 24 or raise `video.crf` to
-23 for faster encodes.
+23 for faster encodes. Each extra format under **Also export** is a full
+render of its own.
+
+## Clips
+
+**"this video has no English captions, so its moments can't be found".**
+Clip mode picks moments from the captions, so it needs English captions
+(auto-generated ones are fine). Try another video.
+
+## Publishing
+
+See [Publish to YouTube](Usage.md#publish-to-youtube) for the setup.
+
+**"YouTube made this upload private".**
+YouTube locks uploads from Google Cloud projects that haven't passed its
+API compliance audit to private. The video is on your channel; make it
+public in YouTube Studio, or request the free
+[audit](https://support.google.com/youtube/contact/yt_api_form) so ClipCut
+can publish publicly and schedule.
+
+**"YouTube access was revoked or has expired".**
+While the OAuth consent screen is in *Testing*, Google ends sign-ins after 7
+days. Press **Reconnect** in **Settings → YouTube** (or run
+`clipcut publish --connect`), or publish the consent screen to production
+to keep the sign-in.
+
+**"this is a Web application client; create a Desktop app client instead".**
+In Google Cloud, create another OAuth client ID of type **Desktop app** and
+use its JSON.
+
+**The sign-in page fails to load after allowing access.**
+Google sends the browser to `http://127.0.0.1:…`, which only works on the
+computer running ClipCut. Copy the full address from the address bar and
+paste it into **Settings → YouTube** (or the terminal running
+`clipcut publish --connect`).
+
+**"Google sent no refresh token".**
+Remove ClipCut at
+[myaccount.google.com/permissions](https://myaccount.google.com/permissions)
+and connect again.
+
+**"YouTube's daily API quota is used up".**
+The free quota allows about 6 uploads a day and resets at midnight Pacific
+time. Failed queue items can be retried the next day; the video is not
+rendered again.
+
+**"the YouTube Data API v3 isn't enabled in your Google Cloud project".**
+Enable it in the
+[API Library](https://console.cloud.google.com/apis/library/youtube.googleapis.com)
+for the project your OAuth client belongs to.
+
+**"Uploaded, but the thumbnail wasn't set".**
+Custom thumbnails need a [verified channel](https://www.youtube.com/verify).
+Shorts never get one; YouTube picks a frame.
 
 ## The app
 

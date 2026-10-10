@@ -15,7 +15,10 @@ is optional: a missing key uses the default shown below. ClipCut checks
 every value on load and names the field if one is out of range.
 
 API keys are stored separately in `keys.json` in the same directory, with
-owner-only permissions. Manage them in **Settings → Keys**.
+owner-only permissions. Manage them in **Settings → Keys**. The YouTube
+publishing client and sign-in live in `youtube-oauth.json`, also
+owner-only; manage them in **Settings → YouTube** (see
+[Publish to YouTube](Usage.md#publish-to-youtube)).
 
 ## Full default file
 
@@ -40,6 +43,7 @@ target_seconds = 45
 min_clip_seconds = 1.0
 max_clip_seconds = 3.0
 captions = true
+caption_preset = "pop"
 crf = 20
 
 [search]
@@ -96,16 +100,17 @@ ClipCut has no login. On a shared or public network, set
 
 | Key | Default | Meaning |
 |---|---|---|
-| `format` | `"vertical"` | `vertical` (1080×1920) or `horizontal` (1920×1080) |
+| `format` | `"vertical"` | `vertical` (1080×1920), `horizontal` (1920×1080) or `square` (1080×1080) |
 | `fps` | `30` | Frame rate, 1–60 |
 | `target_seconds` | `45` | Target length, 10–600 |
 | `min_clip_seconds` | `1.0` | Shortest beat, 1–3 |
 | `max_clip_seconds` | `3.0` | Longest beat, 1–3, at least `min_clip_seconds` |
 | `captions` | `true` | Burn in word-by-word captions |
+| `caption_preset` | `"pop"` | Caption style for new projects: `pop`, `hormozi`, `mrbeast`, `minimal` or `karaoke`. See [Caption styles](Usage.md#caption-styles) |
 | `crf` | `20` | x264 quality, 0–51. Lower is better quality and a bigger file |
 
-The format, length and voice chosen in the app override these defaults for
-that project.
+The format, length, voice and caption style chosen in the app override
+these defaults for that project.
 
 ## search
 
