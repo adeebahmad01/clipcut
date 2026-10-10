@@ -7,10 +7,11 @@ is plain HTML, CSS and JavaScript, embedded in the binary at build time.
 crates/
   core/      config, data paths, tool detection, API key rotation, shared types
   llm/       runs Claude Code, prompts and JSON schemas, the unslop pass
-  sources/   search, YouTube, GIFs, memes, images, icons, article screenshots, setup downloads
+  sources/   search, YouTube, GIFs, memes, images, icons, article screenshots, topic ideas, setup downloads
   tts/       Kokoro-82M through ONNX Runtime, espeak phonemes, word alignment
-  render/    the director, frame compositing, sound effects, ffmpeg encoding
-  app/       the clipcut binary: CLI, HTTP server, pipeline, project store, doctor
+  render/    the director, frame compositing, sound effects, thumbnails, ffmpeg encoding
+  app/       the clipcut binary: CLI, HTTP server, pipeline, project store, queue,
+             clip mode, YouTube publishing, doctor
     web/     the UI (embedded with rust-embed)
 assets/fonts Anton, Archivo Black, Inter (embedded)
 tools/       mock-server.mjs for working on the UI without the backend
@@ -47,7 +48,24 @@ project after each one, so any stage can be re-run from the UI or with
    into a timeline: entrance animations, captions, icons, sound effect
    cues. Frames are drawn with tiny-skia and resvg and piped into ffmpeg,
    and the audio is mixed separately (voice, synthesized effects, ducked
-   music) and muxed in.
+   music) and muxed in. Each extra format gets its own timeline from the
+   same beats, so layouts are rebuilt rather than cropped. The render also
+   writes `.srt`/`.vtt` caption files from the word timings and a thumbnail
+   (`render::thumbnail`).
+
+Clip projects (`app::clips`) skip the first three stages: Claude picks
+moments from a long video's captions, each moment becomes a one-beat
+project, and the voice track is the source audio.
+
+## Queue and publishing
+
+`app::queue` keeps a list of topics in `queue.json` and runs them one at a
+time through the same pipeline with Autopilot on. `app::publish` uploads a
+render to YouTube with the Data API's resumable upload, using an OAuth
+client the user creates in their own Google Cloud project (installed-app
+flow with PKCE and a loopback redirect). The client and tokens are stored
+owner-only in `youtube-oauth.json`; the queue can publish each video as it
+finishes.
 
 Progress is sent to the UI over server-sent events (`/api/events`).
 

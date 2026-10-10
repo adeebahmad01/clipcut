@@ -6,6 +6,24 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Publish to YouTube from the app or `clipcut publish`, with privacy and
+  scheduled release times, using your own free Google Cloud OAuth client.
+- Batch queue: a Queue page and `clipcut batch topics.txt` make videos one
+  after another, and can publish each one as it renders.
+- Topic ideas from Google Trends or the news, in the app and with
+  `clipcut ideas`.
+- Clip mode: cut the best moments of a long YouTube video into captioned
+  shorts (`clipcut clip <url>`).
+- Caption styles: Pop, Hormozi, MrBeast, Minimal and Karaoke.
+- 1:1 square format, and exporting the other formats from the same edit.
+- `.srt` and `.vtt` caption files and a 1280×720 thumbnail with every
+  render.
+- Docs for all of the above in Usage, Configuration, API, Architecture and
+  Troubleshooting, including the Troubleshooting → Publishing section the
+  app links to.
+
 ## [0.1.0] - 2026-10-09
 
 First public release.
