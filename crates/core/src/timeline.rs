@@ -327,6 +327,51 @@ pub struct CaptionStyle {
     /// (defaults to `color`).
     #[serde(default)]
     pub emphasis_color: Option<Rgba>,
+    #[serde(default)]
+    pub preset: CaptionPreset,
+}
+
+/// How captions look and move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptionPreset {
+    /// Heavy uppercase, the spoken word pops in the accent color.
+    #[default]
+    Pop,
+    /// Condensed uppercase, a bright box behind the spoken word.
+    Hormozi,
+    /// Two huge words at a time, thick outline, bouncing colors.
+    Mrbeast,
+    /// Small lowercase sans with a soft shadow, no motion.
+    Minimal,
+    /// A longer line that fills in word by word as it is spoken.
+    Karaoke,
+}
+
+impl CaptionPreset {
+    pub const ALL: [CaptionPreset; 5] =
+        [CaptionPreset::Pop, CaptionPreset::Hormozi, CaptionPreset::Mrbeast, CaptionPreset::Minimal, CaptionPreset::Karaoke];
+
+    pub fn slug(self) -> &'static str {
+        match self {
+            CaptionPreset::Pop => "pop",
+            CaptionPreset::Hormozi => "hormozi",
+            CaptionPreset::Mrbeast => "mrbeast",
+            CaptionPreset::Minimal => "minimal",
+            CaptionPreset::Karaoke => "karaoke",
+        }
+    }
+
+    /// Font, size multiplier, words per group and uppercase for this look.
+    pub fn shape(self) -> (FontKind, f32, usize, bool) {
+        match self {
+            CaptionPreset::Pop => (FontKind::Heavy, 1.0, 3, true),
+            CaptionPreset::Hormozi => (FontKind::Display, 1.1, 3, true),
+            CaptionPreset::Mrbeast => (FontKind::Display, 1.3, 2, true),
+            CaptionPreset::Minimal => (FontKind::Body, 0.7, 5, false),
+            CaptionPreset::Karaoke => (FontKind::Heavy, 0.8, 5, true),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,7 +1,8 @@
 //! Finding and fetching visuals: SearXNG/DuckDuckGo web search, YouTube via
-//! yt-dlp (captions + exact 1-3 s sections), article capture with headless
-//! Chromium, GIPHY/Tenor GIFs, Imgflip meme templates, Pexels/Pixabay stock,
-//! Wikimedia/Openverse images and Iconify icons.
+//! yt-dlp (captions + exact 1-3 s sections, 5-180 s clips with audio), article
+//! capture with headless Chromium, GIPHY/Tenor GIFs, Imgflip meme templates,
+//! Pexels/Pixabay stock, Wikimedia/Openverse images and Iconify icons.
+//! Topic ideas come from Google Trends RSS or news search.
 //!
 //! PUBLIC API CONTRACT — the app crate codes against these signatures.
 
@@ -15,6 +16,7 @@ mod candidates;
 mod captions;
 mod health;
 mod icons;
+mod ideas;
 mod media;
 mod providers;
 mod provenance;
@@ -26,6 +28,7 @@ mod youtube;
 
 pub use article::shutdown_browser;
 pub use captions::{best_moment, parse_vtt};
+pub use ideas::{Idea, IdeaSource, parse_trends_rss};
 pub use providers::rank_memes;
 pub use search::{parse_ddg_html, unwrap_ddg_url};
 pub use youtube::video_id;
@@ -73,6 +76,17 @@ pub struct MemeTemplate {
     pub width: u32,
     pub height: u32,
     pub box_count: u32,
+}
+
+/// Metadata of one YouTube video (`Sources::youtube_info`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VideoInfo {
+    pub id: String,
+    /// https://www.youtube.com/watch?v=ID
+    pub url: String,
+    pub title: String,
+    pub channel: String,
+    pub duration_s: f32,
 }
 
 /// Health of each backend for the doctor page.
@@ -135,6 +149,36 @@ impl Sources {
         };
         if result.is_err() { util::clear_stem(dest_dir, stem); }
         result
+    }
+
+    /// Title, channel and duration of a YouTube video (no download). Rejects
+    /// live/upcoming streams and videos over 4 h.
+    pub async fn youtube_info(&self, url: &str) -> anyhow::Result<VideoInfo> {
+        self.youtube_info_impl(url).await
+    }
+
+    /// "Clip from a long video": download `start_s..end_s` (5-180 s) of `info`
+    /// WITH its audio as an H.264/AAC mp4 at `dest_dir/<stem>.mp4`, plus the
+    /// `<stem>.source.json` provenance sidecar.
+    pub async fn fetch_youtube_segment(
+        &self,
+        info: &VideoInfo,
+        start_s: f32,
+        end_s: f32,
+        dest_dir: &Path,
+        stem: &str,
+    ) -> anyhow::Result<Asset> {
+        util::validate_stem(stem)?;
+        let result = self.fetch_youtube_segment_impl(info, start_s, end_s, dest_dir, stem).await;
+        if result.is_err() { util::clear_stem(dest_dir, stem); }
+        result
+    }
+
+    /// Topic ideas: Google Trends daily searches for `geo` (2-letter country,
+    /// default US; cached 30 min) or news headlines for `query` (default
+    /// "top news today"). `limit` is clamped to 1-50.
+    pub async fn ideas(&self, source: IdeaSource, query: Option<&str>, geo: &str, limit: usize) -> anyhow::Result<Vec<Idea>> {
+        self.ideas_impl(source, query, geo, limit).await
     }
 
     /// Imgflip's popular templates (cached for a day).

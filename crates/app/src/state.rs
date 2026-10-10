@@ -23,6 +23,7 @@ pub enum ServerEvent {
         updated_at: chrono::DateTime<chrono::Utc>,
         running: bool,
     },
+    Queue(crate::queue::QueueState),
 }
 
 /// The four engines, built from one config snapshot.
@@ -44,6 +45,8 @@ pub struct Inner {
     pub keys: KeyPool,
     pub store: ProjectStore,
     pub events: broadcast::Sender<ServerEvent>,
+    pub queue: crate::queue::Queue,
+    pub publish: crate::publish::Publisher,
     config: RwLock<Config>,
     services: RwLock<Services>,
     /// Beats with a search/choose/auto request in flight, as `project/beat`.
@@ -86,11 +89,15 @@ impl AppState {
         let (events, _) = broadcast::channel(1024);
         let services = build_services(&config, &paths, &keys);
         let store = ProjectStore::new(paths.clone(), events.clone());
+        let queue = crate::queue::Queue::load(paths.queue_file(), events.clone());
+        let publish = crate::publish::Publisher::new(paths.youtube_auth_file());
         Ok(Self(Arc::new(Inner {
             paths,
             keys,
             store,
             events,
+            queue,
+            publish,
             bound_port: AtomicU16::new(config.server.port),
             config: RwLock::new(config),
             services: RwLock::new(services),

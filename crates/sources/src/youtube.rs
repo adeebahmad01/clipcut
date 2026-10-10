@@ -4,12 +4,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clipcut_core::{Asset, AssetKind, CaptionCue, Candidate, Tools, VisualKind};
-use serde_json::Value;
+use serde_json::{Value, json};
 
-use crate::Sources;
+use crate::{Sources, VideoInfo};
 use crate::captions::parse_vtt;
-use crate::util::{clear_stem, http_url, read_fresh, relative_to_project, run, with_ext};
-use crate::media::credit_for;
+use crate::util::{clean_text, clear_stem, http_url, read_fresh, relative_to_project, run, with_ext};
+use crate::media::{MAX_SEGMENT_SECONDS, credit_for};
 
 /// Extract the 11-char video id from any YouTube URL form.
 pub fn video_id(url: &str) -> Option<String> {
@@ -200,7 +200,7 @@ impl Sources {
         stem: &str,
         window: Option<(f32, f32)>,
     ) -> anyhow::Result<Asset> {
-        let yt = self.yt_dlp()?;
+        self.yt_dlp()?;
         let id = video_id(&c.page_url).ok_or_else(|| anyhow::anyhow!("not a YouTube URL: {}", c.page_url))?;
         let (a, b) = window.unwrap_or_else(|| {
             let s = c.start_s.unwrap_or(0.0);
@@ -213,63 +213,8 @@ impl Sources {
         }
         let ffmpeg = Tools::require(&self.tools.ffmpeg, "ffmpeg")?;
         Tools::require(&self.tools.ffprobe, "ffprobe")?;
-        tokio::fs::create_dir_all(dest_dir).await?;
-        clear_stem(dest_dir, stem);
-        let template = dest_dir.join(format!("{stem}.yt.%(ext)s")).to_string_lossy().to_string();
-        let section = format!("*{a:.3}-{b:.3}");
         let url = format!("https://www.youtube.com/watch?v={id}");
-        let mut args = self.yt_common_args();
-        if let Some(ffmpeg) = &self.tools.ffmpeg {
-            args.push("--ffmpeg-location".into());
-            args.push(ffmpeg.to_string_lossy().to_string());
-        }
-        args.extend(
-            [
-                "--download-sections",
-                &section,
-                "--force-keyframes-at-cuts",
-                "--format",
-                "bv*[height<=1080][width<=1920][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=1080][width<=1920]+ba/b[height<=1080][width<=1920]",
-                "--downloader-args",
-                "ffmpeg_i:-rw_timeout 10000000",
-                "--downloader-args",
-                "ffmpeg_o:-fs 41943040 -threads 2",
-                "--match-filter",
-                "!is_live",
-                "--merge-output-format",
-                "mp4",
-                "--print",
-                "after_move:filepath",
-                "--no-playlist",
-                "--no-part",
-                "-o",
-                &template,
-                &url,
-            ]
-            .map(String::from),
-        );
-        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-        let out = run(yt, &argv, None, Duration::from_secs(120)).await?;
-        let canonical_dir = dest_dir.canonicalize()?;
-        let valid_output = |p: &Path| p.canonicalize().ok().is_some_and(|p| {
-            p.parent() == Some(canonical_dir.as_path())
-                && p.file_stem().is_some_and(|s| s == format!("{stem}.yt").as_str())
-                && p.extension().is_some_and(|e| ["mp4", "webm", "mkv", "mov"].iter().any(|s| e == *s))
-        });
-        let path = out
-            .stdout
-            .lines()
-            .rev()
-            .map(str::trim)
-            .find(|l| !l.is_empty() && valid_output(Path::new(l)))
-            .map(PathBuf::from)
-            .or_else(|| {
-                std::fs::read_dir(dest_dir).ok()?.flatten().map(|e| e.path()).find(|p| {
-                    valid_output(p)
-                })
-            })
-            .ok_or_else(|| anyhow::anyhow!("yt-dlp produced no file: {}", out.stderr.trim()))?;
-        anyhow::ensure!(std::fs::metadata(&path)?.len() <= 40 * 1024 * 1024, "YouTube section exceeded 40 MiB");
+        let path = self.download_section(&id, (a, b), dest_dir, stem, 40, Duration::from_secs(120)).await?;
         let downloaded = self.validate_video(&path).await?;
         let duration = b - a;
         // Never accept a full download, padding or a truncated near-end section.
@@ -304,6 +249,187 @@ impl Sources {
         }))?;
         Ok(asset)
     }
+
+    /// yt-dlp download of exactly `*a-b` into `dest_dir/<stem>.yt.<ext>`, at most
+    /// `max_mib` MiB. Clears earlier `<stem>.*` files first.
+    async fn download_section(
+        &self, id: &str, (a, b): (f32, f32), dest_dir: &Path, stem: &str, max_mib: u64, timeout: Duration,
+    ) -> anyhow::Result<PathBuf> {
+        let yt = self.yt_dlp()?;
+        tokio::fs::create_dir_all(dest_dir).await?;
+        clear_stem(dest_dir, stem);
+        let template = dest_dir.join(format!("{stem}.yt.%(ext)s")).to_string_lossy().to_string();
+        let section = format!("*{a:.3}-{b:.3}");
+        let url = format!("https://www.youtube.com/watch?v={id}");
+        let max_bytes = max_mib * 1024 * 1024;
+        let output_args = format!("ffmpeg_o:-fs {max_bytes} -threads 2");
+        let mut args = self.yt_common_args();
+        if let Some(ffmpeg) = &self.tools.ffmpeg {
+            args.push("--ffmpeg-location".into());
+            args.push(ffmpeg.to_string_lossy().to_string());
+        }
+        args.extend(
+            [
+                "--download-sections",
+                &section,
+                "--force-keyframes-at-cuts",
+                "--format",
+                "bv*[height<=1080][width<=1920][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=1080][width<=1920]+ba/b[height<=1080][width<=1920]",
+                "--downloader-args",
+                "ffmpeg_i:-rw_timeout 10000000",
+                "--downloader-args",
+                &output_args,
+                "--match-filter",
+                "!is_live",
+                "--merge-output-format",
+                "mp4",
+                "--print",
+                "after_move:filepath",
+                "--no-playlist",
+                "--no-part",
+                "-o",
+                &template,
+                &url,
+            ]
+            .map(String::from),
+        );
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = run(yt, &argv, None, timeout).await?;
+        let canonical_dir = dest_dir.canonicalize()?;
+        let valid_output = |p: &Path| p.canonicalize().ok().is_some_and(|p| {
+            p.parent() == Some(canonical_dir.as_path())
+                && p.file_stem().is_some_and(|s| s == format!("{stem}.yt").as_str())
+                && p.extension().is_some_and(|e| ["mp4", "webm", "mkv", "mov"].iter().any(|s| e == *s))
+        });
+        let path = out
+            .stdout
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && valid_output(Path::new(l)))
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::fs::read_dir(dest_dir).ok()?.flatten().map(|e| e.path()).find(|p| {
+                    valid_output(p)
+                })
+            })
+            .ok_or_else(|| anyhow::anyhow!("yt-dlp produced no file: {}", out.stderr.trim()))?;
+        anyhow::ensure!(std::fs::metadata(&path)?.len() <= max_bytes, "YouTube section exceeded {max_mib} MiB");
+        Ok(path)
+    }
+
+    pub(crate) async fn youtube_info_impl(&self, url: &str) -> anyhow::Result<VideoInfo> {
+        let id = video_id(url).ok_or_else(|| anyhow::anyhow!("not a YouTube URL: {}", clean_text(url, 200)))?;
+        let yt = self.yt_dlp()?;
+        let watch = format!("https://www.youtube.com/watch?v={id}");
+        let mut args = self.yt_common_args();
+        args.extend(["--skip-download", "--no-playlist", "--print", INFO_TEMPLATE, &watch].map(String::from));
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = run(yt, &argv, None, Duration::from_secs(60)).await?;
+        let info = parse_video_info(&out.stdout)?;
+        anyhow::ensure!(info.id == id, "yt-dlp described video {} instead of {id}", info.id);
+        Ok(info)
+    }
+
+    /// 5-180 s section WITH audio ("clip from a long video"), H.264/AAC mp4.
+    pub(crate) async fn fetch_youtube_segment_impl(
+        &self, info: &VideoInfo, a: f32, b: f32, dest_dir: &Path, stem: &str,
+    ) -> anyhow::Result<Asset> {
+        self.yt_dlp()?;
+        let id = video_id(&info.id).filter(|id| *id == info.id && video_id(&info.url).as_ref() == Some(id))
+            .ok_or_else(|| anyhow::anyhow!("not a YouTube video: {} ({})", clean_text(&info.id, 40), clean_text(&info.url, 200)))?;
+        validate_segment(a, b, info.duration_s)?;
+        let ffmpeg = Tools::require(&self.tools.ffmpeg, "ffmpeg")?;
+        Tools::require(&self.tools.ffprobe, "ffprobe")?;
+        let url = format!("https://www.youtube.com/watch?v={id}");
+        let path = self.download_section(&id, (a, b), dest_dir, stem, 300, Duration::from_secs(600)).await?;
+        let length = b - a;
+        let downloaded = self.validate_video_within(&path, MAX_SEGMENT_SECONDS).await?;
+        anyhow::ensure!(downloaded.has_audio, "the section has no audio");
+        anyhow::ensure!((downloaded.duration_s - length).abs() <= 0.35,
+            "yt-dlp produced {}s instead of the requested {length}s section", downloaded.duration_s);
+        let final_path = with_ext(dest_dir, stem, "mp4");
+        run(ffmpeg, &["-nostdin", "-y", "-v", "error", "-xerror", "-i", &path.to_string_lossy(),
+            "-map", "0:v:0", "-map", "0:a:0", "-t", &format!("{length:.6}"), "-vf",
+            "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p", "-r", "30",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-threads", "2",
+            "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2", "-movflags", "+faststart",
+            &final_path.to_string_lossy()],
+            None, Duration::from_secs(600)).await?;
+        let probe = self.validate_video_within(&final_path, MAX_SEGMENT_SECONDS).await?;
+        anyhow::ensure!(probe.has_audio, "the section has no audio");
+        anyhow::ensure!((probe.duration_s - length).abs() <= 0.1, "clip is {}s instead of the requested {length}s", probe.duration_s);
+        let _ = tokio::fs::remove_file(&path).await;
+        let c = Candidate {
+            kind: VisualKind::Youtube,
+            provider: "youtube".into(),
+            title: clean_text(&info.title, 300),
+            page_url: url.clone(),
+            media_url: None,
+            thumbnail_url: None,
+            duration_s: Some(info.duration_s),
+            width: None,
+            height: None,
+            start_s: Some(a),
+            extra: json!({"id": id, "channel": clean_text(&info.channel, 300), "license_status": "unknown_requires_review"}),
+        };
+        let asset = Asset {
+            kind: AssetKind::Video,
+            path: relative_to_project(dest_dir, &final_path),
+            provider: "youtube".into(),
+            source_url: format!("{url}&t={}s", a.floor() as u32),
+            credit: credit_for(&c),
+            width: probe.width,
+            height: probe.height,
+            duration_s: Some(probe.duration_s),
+            trim_start_s: 0.0,
+            focus: None,
+        };
+        crate::provenance::record(&c, &asset, &final_path, None, json!({
+            "mode": "youtube_clip_section", "start_s": a, "end_s": b, "duration_tolerance_s": 0.1,
+        }))?;
+        Ok(asset)
+    }
+}
+
+/// `--print` template for `youtube_info`: one JSON object line.
+const INFO_TEMPLATE: &str = "%(.{id,title,channel,uploader,duration,live_status,is_live})j";
+/// Longest video `youtube_info` accepts (4 h).
+const MAX_INFO_SECONDS: f32 = 14_400.0;
+
+/// Last JSON object line of yt-dlp's `INFO_TEMPLATE` output.
+fn parse_video_info(stdout: &str) -> anyhow::Result<VideoInfo> {
+    let v = stdout.lines().rev().map(str::trim).filter(|l| !l.is_empty())
+        .find_map(|l| serde_json::from_str::<Value>(l).ok().filter(Value::is_object))
+        .ok_or_else(|| anyhow::anyhow!("yt-dlp printed no video metadata"))?;
+    let id = v["id"].as_str().filter(|id| video_id(id).as_deref() == Some(*id))
+        .ok_or_else(|| anyhow::anyhow!("yt-dlp metadata has no valid video id"))?;
+    let live = v["live_status"].as_str().is_some_and(|s| matches!(s, "is_live" | "is_upcoming" | "post_live"))
+        || v["is_live"].as_bool() == Some(true);
+    anyhow::ensure!(!live, "live streams can't be clipped; wait for the replay");
+    let duration = v["duration"].as_f64().map(|d| d as f32).filter(|d| d.is_finite() && *d > 0.0)
+        .ok_or_else(|| anyhow::anyhow!("video has no known duration"))?;
+    anyhow::ensure!(duration <= MAX_INFO_SECONDS, "video is {:.1} h long; the limit is 4 h", duration / 3600.0);
+    let text = |k: &str| v[k].as_str().map(|s| clean_text(s, 300)).filter(|s| !s.is_empty());
+    Ok(VideoInfo {
+        id: id.to_string(),
+        url: format!("https://www.youtube.com/watch?v={id}"),
+        title: text("title").unwrap_or_else(|| format!("YouTube video {id}")),
+        channel: text("channel").or_else(|| text("uploader")).unwrap_or_default(),
+        duration_s: duration,
+    })
+}
+
+/// Long-video clip window: finite, inside the video and 5-180 s long
+/// (1 ms slack for f32 rounding).
+fn validate_segment(a: f32, b: f32, video_s: f32) -> anyhow::Result<()> {
+    anyhow::ensure!(a.is_finite() && b.is_finite() && a >= 0.0 && b > a,
+        "clip window must be finite, nonnegative and increasing; got {a}-{b}");
+    let len = b - a;
+    anyhow::ensure!((5.0 - 0.001..=180.0 + 0.001).contains(&len), "clip must be 5-180s long; got {len:.2}s");
+    anyhow::ensure!(video_s.is_finite() && video_s > 0.0 && b <= video_s + 0.001,
+        "clip window {a}-{b} exceeds the video's {video_s}s");
+    Ok(())
 }
 
 fn validate_window(a: f32, b: f32) -> anyhow::Result<()> {
@@ -340,5 +466,42 @@ mod tests {
         for (a, b) in [(-1.0, 1.0), (0.0, 0.9), (0.0, 3.1), (0.0, 6.0), (0.0, f32::NAN)] {
             assert!(super::validate_window(a, b).is_err());
         }
+    }
+
+    #[test]
+    fn segment_windows() {
+        for (a, b) in [(0.0, 5.0), (10.5, 190.5), (420.0, 600.0), (595.0, 600.0), (0.3, 5.3)] {
+            assert!(super::validate_segment(a, b, 600.0).is_ok(), "{a}-{b}");
+        }
+        for (a, b, d) in [(-1.0, 10.0, 600.0), (0.0, 4.9, 600.0), (0.0, 180.5, 600.0), (595.0, 601.0, 600.0),
+            (f32::NAN, 10.0, 600.0), (10.0, 5.0, 600.0), (0.0, f32::INFINITY, 600.0), (0.0, 10.0, f32::NAN), (0.0, 10.0, 0.0)] {
+            assert!(super::validate_segment(a, b, d).is_err(), "{a}-{b} of {d}");
+        }
+    }
+
+    #[test]
+    fn parses_video_info() {
+        use serde_json::json;
+        let line = |v: serde_json::Value| format!("noise from a plugin\n{v}\n\n");
+        let ok = json!({"id": "dQw4w9WgXcQ", "title": "  Never\n Gonna\tGive  ", "channel": null, "uploader": "Rick",
+            "duration": 213.5, "live_status": "not_live", "is_live": false});
+        let i = super::parse_video_info(&line(ok)).unwrap();
+        assert_eq!((i.id.as_str(), i.url.as_str()), ("dQw4w9WgXcQ", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"));
+        assert_eq!((i.title.as_str(), i.channel.as_str(), i.duration_s), ("Never Gonna Give", "Rick", 213.5));
+        let long = json!({"id": "dQw4w9WgXcQ", "title": "é".repeat(400), "channel": "C", "duration": 60});
+        let i = super::parse_video_info(&line(long)).unwrap();
+        assert_eq!((i.title.chars().count(), i.channel.as_str()), (300, "C"));
+        for status in ["is_live", "is_upcoming", "post_live"] {
+            let v = json!({"id": "dQw4w9WgXcQ", "title": "t", "duration": 60, "live_status": status});
+            assert!(super::parse_video_info(&line(v)).unwrap_err().to_string().contains("wait for the replay"));
+        }
+        let live = json!({"id": "dQw4w9WgXcQ", "title": "t", "duration": 60, "is_live": true});
+        assert!(super::parse_video_info(&line(live)).is_err());
+        for d in [json!(null), json!(0), json!(-5), json!("NA"), json!(14_401)] {
+            assert!(super::parse_video_info(&line(json!({"id": "dQw4w9WgXcQ", "title": "t", "duration": d}))).is_err(), "{d}");
+        }
+        assert!(super::parse_video_info(&line(json!({"id": "../etc", "title": "t", "duration": 60}))).is_err());
+        assert!(super::parse_video_info("").is_err());
+        assert!(super::parse_video_info("{malformed\n").is_err());
     }
 }

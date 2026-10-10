@@ -16,6 +16,8 @@ const MAX_STOCK_BYTES: u64 = 40 * 1024 * 1024;
 /// Longest image side kept; bigger photos are downscaled.
 const MAX_IMAGE_SIDE: u32 = 2560;
 const MAX_VIDEO_SECONDS: f32 = 120.0;
+/// Long-video sections (`fetch_youtube_segment`): up to 180 s plus slack.
+pub(crate) const MAX_SEGMENT_SECONDS: f32 = 200.0;
 const MAX_IMAGE_PIXELS: u64 = 40_000_000;
 
 struct VideoStream {
@@ -27,7 +29,7 @@ struct VideoStream {
 }
 
 impl Sources {
-    pub(crate) async fn probe(&self, file: &Path) -> anyhow::Result<Probe> {
+    async fn probe(&self, file: &Path, max_s: f32) -> anyhow::Result<Probe> {
         let ffprobe = Tools::require(&self.tools.ffprobe, "ffprobe")?;
         let path = file.to_string_lossy();
         let out = run(ffprobe, &["-v", "error", "-show_entries",
@@ -48,7 +50,7 @@ impl Sources {
             }
             if s["codec_type"].as_str() == Some("audio") { probe.has_audio = true; }
         }
-        validate_video_probe(&probe)?;
+        validate_video_probe(&probe, max_s)?;
         Ok(probe)
     }
 
@@ -76,7 +78,12 @@ impl Sources {
     }
 
     pub(crate) async fn validate_video(&self, file: &Path) -> anyhow::Result<Probe> {
-        let p = self.probe(file).await?;
+        self.validate_video_within(file, MAX_VIDEO_SECONDS).await
+    }
+
+    /// `validate_video` with an explicit duration cap (seconds).
+    pub(crate) async fn validate_video_within(&self, file: &Path, max_s: f32) -> anyhow::Result<Probe> {
+        let p = self.probe(file, max_s).await?;
         let s = self.video_stream(file).await?;
         anyhow::ensure!(s.frames >= 2, "media is a still image / single-frame video, not animation");
         let ffmpeg = Tools::require(&self.tools.ffmpeg, "ffmpeg")?;
@@ -354,12 +361,12 @@ pub(crate) fn decode_image(bytes: &[u8]) -> anyhow::Result<image::DynamicImage> 
     Ok(reader.decode()?)
 }
 
-fn validate_video_probe(p: &Probe) -> anyhow::Result<()> {
+fn validate_video_probe(p: &Probe, max_s: f32) -> anyhow::Result<()> {
     anyhow::ensure!(p.has_video && p.width >= 16 && p.height >= 16
         && p.width.max(p.height) <= 4096 && u64::from(p.width) * u64::from(p.height) <= 8_847_360,
         "missing video / unsafe dimensions {}x{}", p.width, p.height);
-    anyhow::ensure!(p.duration_s.is_finite() && p.duration_s > 0.0 && p.duration_s <= MAX_VIDEO_SECONDS,
-        "video duration must be finite and within 0-{MAX_VIDEO_SECONDS}s, got {}", p.duration_s);
+    anyhow::ensure!(p.duration_s.is_finite() && p.duration_s > 0.0 && p.duration_s <= max_s,
+        "video duration must be finite and within 0-{max_s}s, got {}", p.duration_s);
     anyhow::ensure!(p.fps.is_finite() && p.fps > 0.0 && p.fps <= 120.0, "unsupported video frame rate {}", p.fps);
     Ok(())
 }
@@ -372,10 +379,14 @@ mod tests {
         assert!(decode_image(b"<html>fake PNG</html>").is_err());
         assert!(decode_image(b"").is_err());
         let mut p = Probe { has_video: true, width: 640, height: 360, duration_s: 2.0, fps: 25.0, ..Default::default() };
-        assert!(validate_video_probe(&p).is_ok());
+        assert!(validate_video_probe(&p, MAX_VIDEO_SECONDS).is_ok());
+        p.duration_s = 180.0;
+        assert!(validate_video_probe(&p, MAX_SEGMENT_SECONDS).is_ok());
         for d in [0.0, -1.0, f32::NAN, f32::INFINITY, 121.0] {
             p.duration_s = d;
-            assert!(validate_video_probe(&p).is_err());
+            assert!(validate_video_probe(&p, MAX_VIDEO_SECONDS).is_err());
         }
+        p.duration_s = 201.0;
+        assert!(validate_video_probe(&p, MAX_SEGMENT_SECONDS).is_err());
     }
 }

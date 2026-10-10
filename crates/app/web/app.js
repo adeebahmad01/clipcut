@@ -124,6 +124,14 @@ function fmtClock(s) {
   const sec = s - m * 60;
   return `${m}:${sec.toFixed(1).padStart(4, '0')}`;
 }
+/** Timestamp in a long video: 4:05 or 1:02:05. */
+function fmtStamp(s) {
+  s = Math.max(0, Math.floor(s || 0));
+  const hh = Math.floor(s / 3600);
+  const mm = Math.floor((s % 3600) / 60);
+  const ss = String(s % 60).padStart(2, '0');
+  return hh ? `${hh}:${String(mm).padStart(2, '0')}:${ss}` : `${mm}:${ss}`;
+}
 function fmtDuration(s) {
   if (s == null) return '';
   s = Math.round(s);
@@ -210,6 +218,14 @@ const ICONS = {
   image: 'M3 5h18v14H3zM3 16l5-5 4 4 3-3 6 6M15.5 9.5a.5.5 0 100-1 .5.5 0 000 1z',
   text: 'M5 6V4h14v2M12 4v16M9 20h6',
   globe: 'M12 3a9 9 0 100 18 9 9 0 000-18zM3 12h18M12 3c2.5 2.5 3.8 5.5 3.8 9s-1.3 6.5-3.8 9c-2.5-2.5-3.8-5.5-3.8-9S9.5 5.5 12 3z',
+  list: 'M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01',
+  scissors: 'M6 3a3 3 0 100 6 3 3 0 000-6zM6 15a3 3 0 100 6 3 3 0 000-6zM8.1 8.1L20 20M8.1 15.9L20 4',
+  send: 'M22 2L11 13M22 2l-7 20-4-9-9-4z',
+  calendar: 'M4 5h16v16H4zM4 10h16M8 3v4M16 3v4',
+  pause: 'M8 5v14M16 5v14',
+  square: 'M4 4h16v16H4z',
+  trend: 'M3 17l6-6 4 4 8-8M15 7h6v6',
+  youtube: 'M2.6 7.6a3 3 0 012.5-2.7C7.4 4.6 9.7 4.5 12 4.5s4.6.1 6.9.4a3 3 0 012.5 2.7c.2 1.5.3 2.9.3 4.4s-.1 2.9-.3 4.4a3 3 0 01-2.5 2.7c-2.3.3-4.6.4-6.9.4s-4.6-.1-6.9-.4a3 3 0 01-2.5-2.7C2.4 14.9 2.3 13.5 2.3 12s.1-2.9.3-4.4zM10 9v6l5-3z',
 };
 const FILLED = new Set(['play', 'bolt']);
 
@@ -245,6 +261,37 @@ const KIND_IDS = Object.keys(KINDS);
 const BEAT_STATUS = {
   pending: 'Pending', searching: 'Searching', ready: 'Ready', fallback: 'Fallback', failed: 'Failed',
 };
+
+const FORMATS = [
+  ['vertical', '9:16', 'phone', '9:16 vertical'],
+  ['horizontal', '16:9', 'monitor', '16:9 horizontal'],
+  ['square', '1:1', 'square', '1:1 square'],
+];
+const FMT_LABEL = Object.fromEntries(FORMATS.map(([id, ratio]) => [id, ratio]));
+const FMT_LONG = Object.fromEntries(FORMATS.map(([id, , , long]) => [id, long]));
+/** CSS modifier for media boxes: '' for vertical, else the format name. */
+const fmtClass = (format) => (format && format !== 'vertical' ? format : '');
+const CAPTION_PRESETS = [
+  ['pop', 'Pop', 'Bold words that pop in'],
+  ['hormozi', 'Hormozi', 'Huge yellow keywords, two words at a time'],
+  ['mrbeast', 'MrBeast', 'Chunky outlined text with a bounce'],
+  ['minimal', 'Minimal', 'Small clean lower captions'],
+  ['karaoke', 'Karaoke', 'Full line, the spoken word lights up'],
+];
+const PRIVACY = [['public', 'Public', 'globe'], ['unlisted', 'Unlisted', 'eyeOff'], ['private', 'Private', 'lock']];
+
+/** `datetime-local` value -> ISO string (or null when empty/invalid). */
+function localToIso(value) {
+  if (!value) return null;
+  const d = new Date(value);
+  return isNaN(d) ? null : d.toISOString();
+}
+/** A Date in local time, formatted for a `datetime-local` input. */
+function localInputValue(date) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+const fmtWhen = (iso) => (iso ? new Date(iso).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '');
 
 /** Summarize a stage list into one state for chips and controls. */
 function pipelineState(stages = [], running = false) {
@@ -318,6 +365,10 @@ const state = {
   running: new Map(), // full Project does not include running; summaries/SSE do
   setup: { log: [], progress: null, running: null, pending: new Set(), uncertain: false },
   sse: 'connecting',
+  queue: null, // { items, paused }
+  queueError: null,
+  youtube: null, // publish auth status
+  publishing: new Set(), // project ids with an upload in flight
 };
 
 let revision = 0;
@@ -361,8 +412,9 @@ function dirtyProject(ui, p) {
   if (ui.scriptDraft != null && ui.scriptDraft !== p.script?.text) return 'script';
   if (ui.meta && ['title', 'description', 'hashtags'].some((k) =>
     ui.meta[k] !== (k === 'hashtags' ? (p.script?.hashtags || []).join(' ') : p.script?.[k] || ''))) return 'script';
-  if (ui.projectDraft && ['topic', 'notes', 'voice', 'format', 'target_seconds'].some((k) =>
-    String(ui.projectDraft[k] ?? '') !== String(p[k] ?? ''))) return 'details';
+  if (ui.projectDraft && (['topic', 'notes', 'voice', 'format', 'target_seconds', 'caption_preset'].some((k) =>
+    String(ui.projectDraft[k] ?? '') !== String(p[k] ?? ''))
+    || JSON.stringify(ui.projectDraft.extra_formats || []) !== JSON.stringify(p.extra_formats || []))) return 'details';
   if (Object.entries(ui.edits).some(([id, e]) => {
     const v = p.beats.find((b) => b.id === id)?.visual;
     return v && (e.kind !== v.kind || e.query !== (v.query || '') || e.ost !== (v.on_screen_text || ''));
@@ -417,6 +469,15 @@ async function refreshProject(id) {
 async function loadConfig() {
   try { state.config = await api('GET', '/config'); state.configError = null; } catch (e) { state.configError = e.message; }
   update();
+}
+async function refreshQueue() {
+  try { state.queue = await api('GET', '/queue'); state.queueError = null; } catch (e) { state.queueError = e.message; }
+  update();
+}
+async function refreshYoutube() {
+  try { state.youtube = await api('GET', '/publish/youtube'); } catch { /* keep the last known status */ }
+  update();
+  return state.youtube;
 }
 async function loadVoices() {
   try { state.voices = await api('GET', '/voices'); } catch { state.voices = []; }
@@ -478,6 +539,7 @@ function connectEvents() {
       refreshProjects();
       if (currentView?.projectId) refreshProject(currentView.projectId);
       refreshStatus();
+      refreshQueue();
     }
     update();
   };
@@ -498,6 +560,17 @@ function connectEvents() {
   };
   source.addEventListener('progress', receive(onProgress));
   source.addEventListener('project', receive(onProjectEvent));
+  source.addEventListener('queue', receive(onQueue));
+}
+
+function onQueue(q) {
+  if (!Array.isArray(q.items)) return;
+  const before = new Map((state.queue?.items || []).map((i) => [i.id, `${i.status}/${i.project_id}`]));
+  state.queue = q;
+  state.queueError = null;
+  // New projects appear and finished ones change state as the worker moves on.
+  if (q.items.some((i) => before.get(i.id) !== `${i.status}/${i.project_id}`)) debounce('projects', refreshProjects, 300);
+  update();
 }
 
 function onProgress(ev) {
@@ -748,6 +821,96 @@ function voiceOptions(selected, { includeDefault = true } = {}) {
   return opts;
 }
 
+/** Caption style picker. '' means the default from Preferences. */
+function captionSelect({ id, value, onchange, disabled = false, includeDefault = true }) {
+  const def = state.config?.video?.caption_preset || 'pop';
+  const defLabel = CAPTION_PRESETS.find(([v]) => v === def)?.[1] || def;
+  return h('select', { id, class: 'select sm', 'aria-label': 'Caption style', title: 'Caption style', disabled, onchange: (e) => onchange(e.target.value) },
+    includeDefault ? h('option', { value: '', selected: !value }, `${defLabel} captions (default)`) : null,
+    CAPTION_PRESETS.map(([v, label, desc]) => h('option', { value: v, selected: v === value, title: desc }, `${label} captions`)));
+}
+
+/** Checkboxes for the other aspect ratios rendered from the same edit. */
+function alsoExport({ id, main, value = [], onchange, disabled = false }) {
+  return h('div', { class: 'also', role: 'group', 'aria-label': 'Also export' },
+    h('span', { class: 'also-label' }, 'Also export'),
+    FORMATS.filter(([f]) => f !== main).map(([f, ratio, ic, long]) => h('label', { class: 'also-opt', title: `Also render ${long}` },
+      h('input', { type: 'checkbox', id: `${id}-${f}`, checked: value.includes(f), disabled,
+        onchange: (e) => onchange(FORMATS.map(([x]) => x).filter((x) => x !== main && (x === f ? e.target.checked : value.includes(x)))) }),
+      icon(ic), ratio)));
+}
+
+/** "Need an idea?" row: Google Trends searches or news headlines; click one to use it. */
+function ideasPicker(onpick, { id = 'ideas' } = {}) {
+  const s = { source: null, items: null, error: null, request: 0 };
+  const body = h('div', { class: 'ideas-list', 'aria-live': 'polite' });
+  const btn = (source, ic, label) => h('button', { type: 'button', class: 'btn ghost sm', id: `${id}-${source}`, 'aria-pressed': 'false',
+    onclick: () => load(source) }, icon(ic), label);
+  const buttons = [btn('trends', 'trend', 'Trending'), btn('news', 'globe', 'In the news')];
+  const draw = () => {
+    for (const b of buttons) {
+      const on = b.id === `${id}-${s.source}`;
+      b.setAttribute('aria-pressed', String(on));
+      b.classList.toggle('on', on);
+    }
+    if (!s.source) { body.replaceChildren(); return; }
+    if (s.error) { body.replaceChildren(h('span', { class: 'ideas-err' }, icon('alert'), s.error)); return; }
+    if (!s.items) { body.replaceChildren(spinner(), h('span', { class: 'muted' }, s.source === 'news' ? 'Reading the news…' : 'Checking Google Trends…')); return; }
+    if (!s.items.length) { body.replaceChildren(h('span', { class: 'muted' }, 'Nothing came back. Try the other source.')); return; }
+    body.replaceChildren(...s.items.map((idea) => h('button', {
+      type: 'button', class: 'idea', title: [idea.detail, idea.url].filter(Boolean).join('\n') || idea.title,
+      onclick: () => onpick(idea),
+    }, idea.title, idea.detail && s.source === 'trends' ? h('span', { class: 'idea-detail' }, idea.detail) : null)));
+  };
+  async function load(source) {
+    if (s.source === source && (s.items || !s.error)) { s.source = null; s.items = null; draw(); return; }
+    const request = ++s.request;
+    Object.assign(s, { source, items: null, error: null });
+    draw();
+    try {
+      const items = await api('GET', `/ideas?source=${source}&limit=12`);
+      if (request === s.request) s.items = items;
+    } catch (e) {
+      if (request === s.request) s.error = e.message;
+    }
+    if (request === s.request) draw();
+  }
+  return h('div', { class: 'ideas' },
+    h('div', { class: 'ideas-head' }, h('span', { class: 'ideas-label' }, icon('sparkles'), 'Need an idea?'), buttons), body);
+}
+
+/** Publish options shared by the queue and clip forms. */
+function publishOptions(opts, { id, onchange, spacing = true }) {
+  const connected = !!state.youtube?.connected;
+  if (!connected) {
+    return h('div', { class: 'pub-opts off' }, icon('send'),
+      h('span', null, 'Connect YouTube in ', h('a', { href: '#/settings/youtube' }, 'Settings'), ' to publish each video when it renders.'));
+  }
+  const set = (k, v) => { opts[k] = v; onchange?.(); };
+  return h('div', { class: 'pub-opts' },
+    toggle({ id: `${id}-on`, label: 'Publish to YouTube', checked: opts.on, hint: state.youtube.channel || 'when each video renders',
+      onchange: (v) => set('on', v) }),
+    opts.on ? [
+      h('select', { id: `${id}-privacy`, class: 'select sm', 'aria-label': 'Privacy', onchange: (e) => set('privacy', e.target.value) },
+        PRIVACY.map(([v, label]) => h('option', { value: v, selected: v === opts.privacy }, label))),
+      h('label', { class: 'inline-field' }, icon('calendar'), h('span', { class: 'sr-only' }, 'First release'),
+        h('input', { type: 'datetime-local', id: `${id}-at`, class: 'input sm', value: opts.at, min: localInputValue(new Date()),
+          title: 'First release (leave empty to publish on render)', onchange: (e) => set('at', e.target.value) })),
+      spacing ? h('label', { class: 'inline-field' }, h('span', null, 'then every'),
+        h('input', { type: 'number', id: `${id}-every`, class: 'input sm num', min: 0, max: 720, step: 1, value: opts.everyHours,
+          'aria-label': 'Hours between releases', onchange: (e) => set('everyHours', e.target.value) }), h('span', null, 'h')) : null,
+    ] : null);
+}
+/** Request fields for publishOptions state (or {} when off). */
+function publishBody(opts) {
+  if (!opts.on || !state.youtube?.connected) return {};
+  const hours = Number(opts.everyHours) || 0;
+  return {
+    publish: { privacy: opts.privacy, publish_at: localToIso(opts.at) },
+    publish_every_minutes: hours > 0 ? Math.round(hours * 60) : undefined,
+  };
+}
+
 // ------------------------------------------------------------------ chrome --
 
 function renderChrome() {
@@ -756,6 +919,11 @@ function renderChrome() {
     const on = a.dataset.nav === route.name || (a.dataset.nav === 'home' && route.name === 'project');
     if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   }
+  const pending = (state.queue?.items || []).filter((i) => i.status === 'waiting' || i.status === 'running').length;
+  const qc = $('#queue-count');
+  qc.hidden = !pending;
+  qc.textContent = pending;
+  qc.closest('a').setAttribute('aria-label', pending ? `Queue, ${pending} to make` : 'Queue');
   const conn = $('#conn');
   conn.dataset.state = state.sse;
   conn.title = state.sse === 'up' ? 'Live updates connected' : state.sse === 'down' ? 'Reconnecting to live updates…' : 'Connecting…';
@@ -800,10 +968,19 @@ function HomeView() {
     format: cfg?.video?.format || 'vertical',
     seconds: cfg?.video?.target_seconds || 45,
     voice: '',
+    captions: '',
+    also: [],
     autopilot: localStorage.getItem('cc-autopilot') === '1',
     formatTouched: false, secondsTouched: false,
     busy: false,
   };
+  const clip = {
+    url: sessionStorage.getItem('cc-draft-clip') || '',
+    count: 3, len: '30-60', format: 'vertical', captions: '', also: [],
+    pub: { on: false, privacy: 'public', at: '', everyHours: '' },
+    busy: false, job: null, error: null,
+  };
+  let mode = sessionStorage.getItem('cc-home-mode') === 'clip' ? 'clip' : 'topic';
 
   const topic = h('textarea', {
     id: 'topic', class: 'topic-input', rows: 1, maxlength: 300, autocomplete: 'off', spellcheck: 'true',
@@ -845,6 +1022,7 @@ function HomeView() {
       const p = await api('POST', '/projects', {
         topic: form.topic.trim(), notes: form.notes.trim() || undefined, format: form.format,
         target_seconds: form.seconds, voice: form.voice || undefined, autopilot: form.autopilot,
+        caption_preset: form.captions || undefined, extra_formats: form.also.length ? form.also : undefined,
       });
       sessionStorage.removeItem('cc-draft-topic');
       if (!state.running.has(p.id)) setRunning(p.id, true);
@@ -862,11 +1040,13 @@ function HomeView() {
     }
   }
 
+  const formatOptions = FORMATS.map(([v, ratio, ic]) => [v, ratio, ic]);
   const formatSeg = segmented({ name: 'format', label: 'Format', value: form.format,
-    onchange: (v) => { form.format = v; form.formatTouched = true; },
-    options: [['vertical', '9:16', 'phone'], ['horizontal', '16:9', 'monitor']] });
+    onchange: (v) => { form.format = v; form.formatTouched = true; form.also = form.also.filter((f) => f !== v); update(); },
+    options: formatOptions });
   const lengthWrap = h('div', { class: 'length-options' });
-  const composer = h('form', { class: 'composer', onsubmit: submit },
+  const alsoWrap = h('div', { class: 'also-wrap' });
+  const composer = h('form', { class: 'composer', onsubmit: submit, hidden: mode !== 'topic' },
     h('label', { class: 'sr-only', for: 'topic' }, 'Topic'),
     topic,
     notesWrap,
@@ -876,6 +1056,8 @@ function HomeView() {
         formatSeg, lengthWrap,
         h('div', { class: 'with-icon' }, icon('volume'), voiceSel),
         voicePreviewButton(() => form.voice, 'home-voice-preview'),
+        h('div', { class: 'with-icon' }, icon('text'), captionSelect({ id: 'home-captions', value: form.captions, onchange: (v) => { form.captions = v; } })),
+        alsoWrap,
         toggle({ label: 'Autopilot', checked: form.autopilot, hint: form.autopilot ? 'straight to video' : 'pause to review',
           onchange: (v) => {
             form.autopilot = v;
@@ -883,23 +1065,114 @@ function HomeView() {
             composer.querySelector('.switch-hint').textContent = v ? 'straight to video' : 'pause to review';
           } })),
       make));
+  const ideas = ideasPicker((idea) => {
+    form.topic = idea.title;
+    topic.value = idea.title;
+    sessionStorage.setItem('cc-draft-topic', form.topic);
+    grow(); syncMake(); topic.focus();
+  }, { id: 'home-ideas' });
+  ideas.hidden = mode !== 'topic';
+
+  // Clip mode: cut the best moments of a long video into shorts.
+  const clipUrl = h('input', {
+    id: 'clip-url', class: 'clip-url', type: 'url', inputmode: 'url', autocomplete: 'off', spellcheck: 'false',
+    placeholder: 'https://www.youtube.com/watch?v=…', value: clip.url,
+    oninput: (e) => { clip.url = e.target.value; sessionStorage.setItem('cc-draft-clip', clip.url); syncCut(); },
+  });
+  const cut = h('button', { type: 'submit', class: 'btn primary lg make-btn' }, icon('scissors'), h('span', null, 'Find clips'));
+  const syncCut = () => {
+    cut.disabled = clip.busy || !clip.url.trim();
+    cut.replaceChildren(clip.busy ? spinner('dark') : icon('scissors'), h('span', null, clip.busy ? 'Finding…' : 'Find clips'));
+  };
+  const clipAlso = h('div', { class: 'also-wrap' });
+  const clipPub = h('div', { class: 'clip-pub' });
+  const clipStatus = h('div', { class: 'clip-status', 'aria-live': 'polite' });
+  async function submitClip(e) {
+    e?.preventDefault();
+    const url = clip.url.trim();
+    if (!url || clip.busy) { clipUrl.focus(); return; }
+    if (!/^https?:\/\//i.test(url)) { toast('Paste the full video link, starting with https://', 'error'); clipUrl.focus(); return; }
+    const [min_s, max_s] = clip.len.split('-').map(Number);
+    Object.assign(clip, { busy: true, error: null, job: `clip-${Math.random().toString(36).slice(2, 12)}` });
+    syncCut(); update();
+    try {
+      const projects = await api('POST', '/clips', {
+        url, count: clip.count, min_s, max_s, format: clip.format, caption_preset: clip.captions || undefined,
+        extra_formats: clip.also.length ? clip.also : undefined, job: clip.job, ...publishBody(clip.pub),
+      });
+      sessionStorage.removeItem('cc-draft-clip');
+      clip.url = '';
+      clipUrl.value = '';
+      toast(projects.length ? `Found ${projects.length} clip${projects.length === 1 ? '' : 's'}. Rendering in the queue.` : 'No good moments found in that video.');
+      refreshProjects();
+      refreshQueue();
+    } catch (err) {
+      clip.error = err.message;
+      toast(err.message, 'error');
+    } finally {
+      Object.assign(clip, { busy: false, job: null });
+      syncCut(); update();
+    }
+  }
+  const clipForm = h('form', { class: 'composer clip-composer', onsubmit: submitClip, hidden: mode !== 'clip' },
+    h('label', { class: 'sr-only', for: 'clip-url' }, 'Video link'),
+    h('div', { class: 'clip-url-row' }, icon('scissors'), clipUrl),
+    h('div', { class: 'composer-bar' },
+      h('div', { class: 'composer-opts' },
+        h('select', { id: 'clip-count', class: 'select sm', 'aria-label': 'How many clips', onchange: (e) => { clip.count = Number(e.target.value); } },
+          [1, 2, 3, 4, 5].map((n) => h('option', { value: n, selected: n === clip.count }, `${n} clip${n === 1 ? '' : 's'}`))),
+        segmented({ name: 'clip-len', label: 'Clip length', value: clip.len, onchange: (v) => { clip.len = v; },
+          options: [['15-30', '15–30s'], ['30-60', '30–60s'], ['45-90', '45–90s']] }),
+        segmented({ name: 'clip-format', label: 'Format', value: clip.format, options: formatOptions,
+          onchange: (v) => { clip.format = v; clip.also = clip.also.filter((f) => f !== v); update(); } }),
+        h('div', { class: 'with-icon' }, icon('text'), captionSelect({ id: 'clip-captions', value: clip.captions, onchange: (v) => { clip.captions = v; } })),
+        clipAlso),
+      cut),
+    clipPub,
+    clipStatus);
+
+  const HERO = {
+    topic: ['What’s the video about?', 'Type a topic. ClipCut researches it, writes a punchy script, finds real clips, memes and screenshots, voices it and renders a short.'],
+    clip: ['Clip a long video', 'Paste a YouTube link. ClipCut reads the captions, picks the strongest moments and reframes each one as a captioned short with sound effects.'],
+  };
+  const heroTitle = h('h1', { class: 'hero-title' }, HERO[mode][0]);
+  const heroSub = h('p', { class: 'hero-sub' }, HERO[mode][1]);
+  const modeSeg = segmented({ name: 'home-mode', label: 'What to make', value: mode,
+    options: [['topic', 'From a topic', 'bolt'], ['clip', 'Clip a long video', 'scissors']],
+    onchange: (v) => {
+      mode = v;
+      sessionStorage.setItem('cc-home-mode', v);
+      composer.hidden = ideas.hidden = v !== 'topic';
+      clipForm.hidden = v !== 'clip';
+      heroTitle.textContent = HERO[v][0];
+      heroSub.textContent = HERO[v][1];
+      if (v === 'topic') grow();
+    } });
+  modeSeg.classList.add('mode-seg');
 
   const list = h('div', { class: 'pgrid' });
   const listHead = h('div', { class: 'section-head' });
   const el = h('div', { class: 'page home' },
     h('section', { class: 'hero' },
-      h('h1', { class: 'hero-title' }, 'What’s the video about?'),
-      h('p', { class: 'hero-sub' }, 'Type a topic. ClipCut researches it, writes a punchy script, finds real clips, memes and screenshots, voices it and renders a short.'),
-      composer),
+      modeSeg,
+      heroTitle,
+      heroSub,
+      composer,
+      clipForm,
+      ideas),
     h('section', { class: 'recent' }, listHead, list));
 
-  setTimeout(() => { grow(); syncMake(); if (!matchMedia('(pointer: coarse)').matches) topic.focus(); });
+  setTimeout(() => {
+    grow(); syncMake(); syncCut();
+    if (!matchMedia('(pointer: coarse)').matches) (mode === 'clip' ? clipUrl : topic).focus();
+  });
 
   return {
     el,
     update() {
       if (state.config && !form.formatTouched && form.format !== state.config.video.format) {
         form.format = state.config.video.format; formatSeg.setValue(form.format);
+        form.also = form.also.filter((f) => f !== form.format);
       }
       if (state.config && !form.secondsTouched) form.seconds = state.config.video.target_seconds;
       patch(lengthWrap, `${state.config?.video?.target_seconds || 45}`, () => segmented({
@@ -907,6 +1180,17 @@ function HomeView() {
         options: [...new Set([30, 45, 60, state.config?.video?.target_seconds || 45])].sort((a, b) => a - b).map((n) => [n, `${n}s`]),
       }));
       patch(voiceSel, `${state.voices.length}|${state.config?.tts?.voice}`, () => voiceOptions(form.voice));
+      patch(alsoWrap, JSON.stringify([form.format, form.also]), () => alsoExport({ id: 'home-also', main: form.format, value: form.also,
+        onchange: (v) => { form.also = v; update(); } }));
+      patch(clipAlso, JSON.stringify([clip.format, clip.also]), () => alsoExport({ id: 'clip-also', main: clip.format, value: clip.also,
+        onchange: (v) => { clip.also = v; update(); } }));
+      patch(clipPub, JSON.stringify([state.youtube?.connected, state.youtube?.channel, clip.pub]), () =>
+        publishOptions(clip.pub, { id: 'clip-pub', onchange: update }));
+      const clipLog = clip.job ? state.logs.get(clip.job)?.at(-1) : null;
+      patch(clipStatus, JSON.stringify([clip.busy, clipLog?.message, clip.error]), () => clip.busy
+        ? [spinner(), h('span', null, clipLog?.message || 'Reading the video…')]
+        : clip.error ? h('span', { class: 'ideas-err' }, icon('alert'), clip.error)
+          : h('span', { class: 'muted' }, 'Works with any video that has captions. Each clip renders in the ', h('a', { href: '#/queue' }, 'Queue'), '.'));
       const ps = state.projects;
       patch(listHead, ps ? ps.length : -1, () => [
         h('h2', null, 'Recent'), ps?.length ? h('span', { class: 'count' }, ps.length) : null,
@@ -929,7 +1213,7 @@ function HomeView() {
       if (list._sig === 'loading' || list._sig === 'empty' || String(list._sig).startsWith('err:')) { list.replaceChildren(); list._sig = 'list'; }
       keyed(list, ps, (p) => p.id, (p) => {
         const live = state.live.get(p.id);
-        return JSON.stringify([p.updated_at, p.running, p.stages.map((s) => [s.status, s.progress]), p.title, p.thumb_url, p.running && live ? [live.message, live.progress] : 0, Math.floor(Date.now() / 60000)]);
+        return JSON.stringify([p.updated_at, p.running, p.stages.map((s) => [s.status, s.progress]), p.title, p.thumb_url, p.kind, p.published?.length, p.running && live ? [live.message, live.progress] : 0, Math.floor(Date.now() / 60000)]);
       }, projectCard);
     },
     unmount() { disposeTree(el); },
@@ -940,18 +1224,23 @@ function projectCard(p) {
   const st = pipelineState(p.stages, p.running);
   const live = p.running ? state.live.get(p.id) : null;
   const hue = parseInt(hashStr(p.id), 36) % 360;
-  const horizontal = p.format === 'horizontal';
+  const contain = p.format !== 'vertical';
+  const published = p.published?.at(-1);
+  const scheduled = published?.publish_at && new Date(published.publish_at) > Date.now();
   let thumb;
   if (p.thumb_url) {
     const src = `${p.thumb_url}${p.thumb_url.includes('?') ? '&' : '?'}v=${encodeURIComponent(p.updated_at)}`;
     thumb = [h('img', { class: 'thumb-bg', src, alt: '', loading: 'lazy', 'aria-hidden': 'true' }),
-      h('img', { class: `thumb-fg ${horizontal ? 'contain' : ''}`, src, alt: '', loading: 'lazy' })];
+      h('img', { class: `thumb-fg ${contain ? 'contain' : ''}`, src, alt: '', loading: 'lazy' })];
   } else {
     thumb = h('div', { class: 'thumb-ph', style: { '--h': hue } }, h('span', { class: 'thumb-ph-text' }, p.title || p.topic));
   }
   return h('a', { class: `pcard ${p.running ? 'is-running' : ''}`, href: `#/p/${encodeURIComponent(p.id)}` },
     h('div', { class: 'pcard-thumb' }, thumb,
-      h('div', { class: 'pcard-top' }, statusChip(st), h('span', { class: 'fmt-tag' }, horizontal ? '16:9' : '9:16')),
+      h('div', { class: 'pcard-top' }, statusChip(st),
+        h('span', { class: 'pcard-tags' },
+          p.kind === 'clip' ? h('span', { class: 'fmt-tag clip-tag', title: 'Clipped from a long video' }, icon('scissors'), 'Clip') : null,
+          h('span', { class: 'fmt-tag' }, FMT_LABEL[p.format] || '9:16'))),
       p.duration_s ? h('span', { class: 'pcard-dur' }, fmtDuration(p.duration_s)) : null,
       p.video_url ? h('span', { class: 'pcard-play', 'aria-hidden': 'true' }, icon('play')) : null,
       p.running ? h('div', { class: 'pcard-progress' },
@@ -964,6 +1253,8 @@ function projectCard(p) {
       h('div', { class: 'pcard-title' }, p.title || p.topic),
       h('div', { class: 'pcard-meta' },
         p.title && p.title !== p.topic ? h('span', { class: 'ellipsis' }, p.topic) : null,
+        published ? h('span', { class: 'pub-tag nowrap', title: scheduled ? `Goes live ${fmtWhen(published.publish_at)}` : `On YouTube (${published.privacy})` },
+          icon(scheduled ? 'calendar' : 'send'), scheduled ? 'Scheduled' : 'Published') : null,
         h('span', { class: 'nowrap' }, relTime(p.created_at))),
       st.kind === 'failed' && st.error ? h('div', { class: 'pcard-err ellipsis', title: st.error }, st.error) : null));
 }
@@ -1007,7 +1298,7 @@ async function patchProject(id, body, okMsg) {
   update();
   try {
     const p = await api('PATCH', `/projects/${encodeURIComponent(id)}`, body);
-    if (Object.keys(body).some((k) => ['topic', 'notes', 'voice', 'format', 'target_seconds', 'chosen_hook', 'script_text'].includes(k))) invalidateRender(id);
+    if (Object.keys(body).some((k) => ['topic', 'notes', 'voice', 'format', 'target_seconds', 'chosen_hook', 'script_text', 'caption_preset', 'extra_formats'].includes(k))) invalidateRender(id);
     acceptProject(p, request);
     if (okMsg) toast(okMsg);
     return true;
@@ -1044,6 +1335,7 @@ function ProjectView(id, initialTab) {
   const ui = {
     tab: initialTab || null, manualTab: !!initialTab, editing: null, edits: {},
     scriptDraft: null, showDraft: false, meta: null, drawer: null, details: false, projectDraft: null,
+    pub: { privacy: 'public', at: '', format: null },
   };
   if (state.project?.id !== id) state.project = null;
   state.projectError = null;
@@ -1138,16 +1430,22 @@ function ProjectView(id, initialTab) {
 
   function renderHead(p, st) {
     const voice = p.voice || state.config?.tts?.voice;
-    patch(head, JSON.stringify([p.topic, p.script?.title, p.format, p.target_seconds, voice, p.autopilot, p.running, projectBusy(id), beatsBusy(id), ui.details]), () => [
+    const isClip = p.kind === 'clip';
+    const src = p.clip;
+    patch(head, JSON.stringify([p.topic, p.script?.title, p.format, p.extra_formats, p.kind, src?.url, p.target_seconds, voice, p.autopilot, p.running, projectBusy(id), beatsBusy(id), ui.details]), () => [
       h('a', { class: 'back', href: '#/' }, icon('back'), 'Projects'),
       h('div', { class: 'phead-row' },
         h('div', { class: 'phead-text' },
           h('h1', { class: 'ptitle' }, p.script?.title || p.topic),
           h('div', { class: 'pmeta' },
-            p.script?.title ? h('span', { class: 'ellipsis' }, p.topic) : null,
-            h('span', { class: 'fmt-tag' }, p.format === 'horizontal' ? '16:9' : '9:16'),
-            h('span', null, `${p.target_seconds}s target`),
-            voice ? h('span', null, icon('volume'), voice) : null)),
+            p.script?.title && !isClip ? h('span', { class: 'ellipsis' }, p.topic) : null,
+            isClip ? h('span', { class: 'fmt-tag clip-tag' }, icon('scissors'), 'Clip') : null,
+            isClip && src ? h('a', { class: 'ellipsis src-link', href: src.url, target: '_blank', rel: 'noopener noreferrer', title: 'Open the source video' },
+              `${src.title || 'Source video'}${src.channel ? ` · ${src.channel}` : ''} · ${fmtStamp(src.start_s)}–${fmtStamp(src.end_s)}`) : null,
+            h('span', { class: 'fmt-tag' }, FMT_LABEL[p.format] || '9:16'),
+            p.extra_formats?.length ? h('span', { title: 'Also exported from the same edit' }, `+ ${p.extra_formats.map((f) => FMT_LABEL[f] || f).join(' ')}`) : null,
+            isClip ? null : h('span', null, `${p.target_seconds}s target`),
+            voice && !isClip ? h('span', null, icon('volume'), voice) : null)),
         h('div', { class: 'phead-actions' },
           toggle({
             id: 'project-autopilot', label: 'Autopilot', checked: p.autopilot, hint: p.autopilot ? 'no pauses' : 'pauses to review', disabled: editBlocked(id) || beatsBusy(id),
@@ -1156,7 +1454,7 @@ function ProjectView(id, initialTab) {
           h('button', { class: 'btn ghost sm', id: 'project-edit', 'aria-expanded': String(ui.details), 'aria-controls': 'project-details-form',
             onclick: () => { ui.details = !ui.details; update(); } }, icon('sliders'), 'Details'),
           h('button', {
-            class: 'btn ghost sm', title: 'Duplicate (keeps research, hooks and script)', 'aria-label': 'Duplicate project',
+            class: 'btn ghost sm', title: isClip ? 'Duplicate (cuts the same moment again)' : 'Duplicate (keeps research, hooks and script)', 'aria-label': 'Duplicate project',
             disabled: editBlocked(id) || beatsBusy(id),
             onclick: async () => {
               if (editBlocked(id) || beatsBusy(id)) return;
@@ -1196,37 +1494,73 @@ function ProjectView(id, initialTab) {
     details.hidden = !ui.details;
     if (!ui.details) return;
     const blocked = editBlocked(id) || beatsBusy(id);
-    patch(details, JSON.stringify([p.topic, p.notes, p.voice, p.format, p.target_seconds, blocked, state.voices.length, !!ui.projectDraft]), () => {
-      const draft = ui.projectDraft || { topic: p.topic, notes: p.notes || '', voice: p.voice || '', format: p.format, target_seconds: p.target_seconds };
-      const edit = (key) => (e) => {
-        ui.projectDraft = { ...draft, ...(ui.projectDraft || {}), [key]: key === 'target_seconds' ? Number(e.target.value) : e.target.value };
+    const isClip = p.kind === 'clip';
+    patch(details, JSON.stringify([p.topic, p.notes, p.voice, p.format, p.target_seconds, p.caption_preset, p.extra_formats, p.kind, blocked,
+      state.voices.length, state.config?.video?.caption_preset, !!ui.projectDraft]), () => {
+      const styling = { format: p.format, caption_preset: p.caption_preset || '', extra_formats: [...(p.extra_formats || [])] };
+      const draft = ui.projectDraft || (isClip ? styling
+        : { topic: p.topic, notes: p.notes || '', voice: p.voice || '', target_seconds: p.target_seconds, ...styling });
+      const set = (key, value) => {
+        ui.projectDraft = { ...draft, ...(ui.projectDraft || {}), [key]: value };
         update();
       };
+      const edit = (key) => (e) => set(key, key === 'target_seconds' ? Number(e.target.value) : e.target.value);
       const field = (key, label, control) => h('div', { class: `field ${['topic', 'notes'].includes(key) ? 'span' : ''}` },
         h('label', { class: 'field-label', for: `project-${key}` }, label), control);
+      // The checkboxes depend on the main format, so they redraw in place.
+      const alsoWrap = h('div', { class: 'also-wrap' });
+      const drawAlso = () => {
+        const d = ui.projectDraft || draft;
+        alsoWrap.replaceChildren(alsoExport({ id: 'project-also', main: d.format, value: d.extra_formats, disabled: blocked,
+          onchange: (v) => { set('extra_formats', v); drawAlso(); } }));
+      };
+      drawAlso();
+      const src = p.clip;
       return h('form', { id: 'project-details-form', class: 'project-details-form', onsubmit: async (e) => {
         e.preventDefault();
         const draft = ui.projectDraft;
-        if (!draft || blocked || !draft.topic.trim() || draft.target_seconds < 10 || draft.target_seconds > 180) return;
+        if (!draft || blocked) return;
+        if (!isClip && (!draft.topic.trim() || draft.target_seconds < 10 || draft.target_seconds > 600)) return;
         const body = {};
         for (const key of Object.keys(draft)) {
+          if (key === 'extra_formats') {
+            if (JSON.stringify(draft[key]) !== JSON.stringify(p.extra_formats || [])) body[key] = draft[key];
+            continue;
+          }
           const value = typeof draft[key] === 'string' ? draft[key].trim() : draft[key];
-          if (String(value) !== String(p[key] ?? '')) body[key] = value;
+          if (String(value) !== String(p[key] ?? '')) body[key] = key === 'caption_preset' ? value || null : value;
         }
         if (!Object.keys(body).length) return;
-        if (!(await confirmDialog({ title: 'Save project details?', body: 'Changing the topic, notes, voice, format or length invalidates affected downstream work. Continue the pipeline afterwards to rebuild it.', ok: 'Save details' }))) return;
+        const what = isClip ? 'Changing the format, captions or extra exports means the clip renders again.'
+          : 'Changing the topic, notes, voice, format, captions or length invalidates affected downstream work. Continue the pipeline afterwards to rebuild it.';
+        if (!(await confirmDialog({ title: 'Save project details?', body: what, ok: 'Save details' }))) return;
         if (await patchProject(id, body, 'Project details saved')) { ui.projectDraft = null; update(); }
       } },
-      h('h2', { class: 'span' }, 'Project details'),
+      h('h2', { class: 'span' }, isClip ? 'Clip details' : 'Project details'),
       p.running ? h('p', { class: 'muted span' }, 'Cancel the pipeline before making review edits.') : null,
-      field('topic', 'Topic', h('input', { id: 'project-topic', class: 'input', maxlength: 300, required: true, value: draft.topic, disabled: blocked, oninput: edit('topic') })),
-      field('notes', 'Notes for the writer', h('textarea', { id: 'project-notes', class: 'input', rows: 3, value: draft.notes, disabled: blocked, oninput: edit('notes') })),
-      field('voice', 'Voice', h('div', { class: 'row gap' },
-        h('select', { id: 'project-voice', class: 'select', disabled: blocked, onchange: edit('voice') }, voiceOptions(draft.voice)),
-        voicePreviewButton(() => ui.projectDraft?.voice ?? draft.voice, 'project-voice-preview'))),
-      field('format', 'Format', h('select', { id: 'project-format', class: 'select', disabled: blocked, onchange: edit('format') },
-        ['vertical', 'horizontal'].map((value) => h('option', { value, selected: value === draft.format }, value === 'vertical' ? '9:16 vertical' : '16:9 horizontal')))),
-      field('target_seconds', 'Target length (seconds)', h('input', { id: 'project-target_seconds', class: 'input', type: 'number', min: 10, max: 180, required: true, value: draft.target_seconds, disabled: blocked, oninput: edit('target_seconds') })),
+      isClip && src ? h('dl', { class: 'clip-source span' },
+        h('dt', null, 'Source'), h('dd', null, h('a', { href: src.url, target: '_blank', rel: 'noopener noreferrer' },
+          src.title || src.url, src.channel ? ` · ${src.channel}` : '', icon('external'))),
+        h('dt', null, 'Moment'), h('dd', null, `${fmtStamp(src.start_s)}–${fmtStamp(src.end_s)} (${fmtDuration(src.end_s - src.start_s)})`),
+        src.hook ? [h('dt', null, 'Hook'), h('dd', null, src.hook)] : null,
+        src.reason ? [h('dt', null, 'Why this moment'), h('dd', { class: 'muted' }, src.reason)] : null) : null,
+      isClip ? null : [
+        field('topic', 'Topic', h('input', { id: 'project-topic', class: 'input', maxlength: 300, required: true, value: draft.topic, disabled: blocked, oninput: edit('topic') })),
+        field('notes', 'Notes for the writer', h('textarea', { id: 'project-notes', class: 'input', rows: 3, value: draft.notes, disabled: blocked, oninput: edit('notes') })),
+        field('voice', 'Voice', h('div', { class: 'row gap' },
+          h('select', { id: 'project-voice', class: 'select', disabled: blocked, onchange: edit('voice') }, voiceOptions(draft.voice)),
+          voicePreviewButton(() => ui.projectDraft?.voice ?? draft.voice, 'project-voice-preview'))),
+      ],
+      field('format', 'Format', h('select', { id: 'project-format', class: 'select', disabled: blocked, onchange: (e) => {
+        const format = e.target.value;
+        ui.projectDraft = { ...draft, ...(ui.projectDraft || {}) };
+        ui.projectDraft.extra_formats = ui.projectDraft.extra_formats.filter((f) => f !== format);
+        set('format', format);
+        drawAlso();
+      } }, FORMATS.map(([value, , , long]) => h('option', { value, selected: value === draft.format }, long)))),
+      field('caption_preset', 'Captions', captionSelect({ id: 'project-caption_preset', value: draft.caption_preset, disabled: blocked, onchange: (v) => set('caption_preset', v) })),
+      isClip ? null : field('target_seconds', 'Target length (seconds)', h('input', { id: 'project-target_seconds', class: 'input', type: 'number', min: 10, max: 600, required: true, value: draft.target_seconds, disabled: blocked, oninput: edit('target_seconds') })),
+      h('div', { class: 'field span' }, alsoWrap),
       h('div', { class: 'row gap end span' },
         h('button', { class: 'btn ghost sm', type: 'button', disabled: blocked || !ui.projectDraft, onclick: () => { ui.projectDraft = null; update(); } }, 'Revert'),
         h('button', { class: 'btn primary sm', type: 'submit', disabled: blocked || !ui.projectDraft }, 'Save details')));
@@ -1235,6 +1569,7 @@ function ProjectView(id, initialTab) {
 
   function renderPreview(p, st) {
     preview.classList.toggle('horizontal', p.format === 'horizontal');
+    preview.classList.toggle('square', p.format === 'square');
     const lastReady = [...p.beats].reverse().find((b) => b.asset && (b.status === 'ready' || b.status === 'fallback'));
     const ready = renderReady(p);
     const mediaSig = ready ? `r:${p.render.rendered_at}` : lastReady ? `b:${JSON.stringify(lastReady.asset)}` : 'ph';
@@ -1357,25 +1692,118 @@ function ProjectView(id, initialTab) {
     kit.hidden = !renderReady(p);
     if (!renderReady(p)) return;
     const s = p.script || {};
-    patch(kit, JSON.stringify([p.render.rendered_at, s.title, s.description, s.hashtags]), () => {
+    const r = p.render;
+    patch(kit, JSON.stringify([r.rendered_at, s.title, s.description, s.hashtags, p.format, r.variants, r.subtitles, r.thumbnail_jpg]), () => {
       const row = (label, text, what) => h('div', { class: 'kit-row' },
         h('div', { class: 'kit-label' }, label),
         h('div', { class: 'kit-val' }, text || h('span', { class: 'muted' }, '—')),
         text ? h('button', { class: 'icon-btn', 'aria-label': `Copy ${what}`, title: `Copy ${what}`, onclick: () => copyText(text, what) }, icon('copy')) : null);
       const tags = (s.hashtags || []).join(' ');
+      const dl = (file) => `/api/projects/${encodeURIComponent(p.id)}/download?file=${file}`;
+      const files = [
+        ...(r.variants || []).map((v) => h('a', { class: 'btn ghost sm', href: dl(v.format), download: '', title: `${v.width}×${v.height}` },
+          icon('download'), `${FMT_LABEL[v.format] || v.format} MP4`)),
+        r.subtitles ? [
+          h('a', { class: 'btn ghost sm', href: dl('srt'), download: '', title: 'Captions for YouTube, Premiere, Resolve…' }, icon('doc'), 'SRT'),
+          h('a', { class: 'btn ghost sm', href: dl('vtt'), download: '', title: 'Captions for the web' }, icon('doc'), 'VTT'),
+        ] : null,
+        r.thumbnail_jpg ? h('a', { class: 'btn ghost sm', href: dl('thumb'), download: '' }, icon('image'), 'Thumbnail') : null,
+        h('a', { class: 'btn ghost sm', href: fileUrl(p.id, r.credits_path), target: '_blank', rel: 'noopener' }, icon('doc'), 'Credits'),
+      ];
       return [
         h('div', { class: 'kit-head' },
           h('div', null, h('h2', null, 'Ready to post'),
-            h('p', { class: 'muted' }, `${fmtDuration(p.render.duration_s)} · ${p.render.width}×${p.render.height} · rendered ${relTime(p.render.rendered_at)}`)),
+            h('p', { class: 'muted' }, `${fmtDuration(r.duration_s)} · ${r.width}×${r.height} · rendered ${relTime(r.rendered_at)}`)),
           h('div', { class: 'kit-actions' },
-            h('a', { class: 'btn ghost sm', href: fileUrl(p.id, p.render.credits_path), target: '_blank', rel: 'noopener' }, icon('doc'), 'Credits'),
-            h('a', { class: 'btn primary', href: `/api/projects/${encodeURIComponent(p.id)}/download`, download: '' }, icon('download'), 'Download MP4'))),
-        row('Title', s.title, 'Title'),
-        row('Description', s.description, 'Description'),
-        row('Hashtags', tags, 'Hashtags'),
-        h('button', { class: 'btn ghost sm kit-all', onclick: () => copyText([s.title, '', s.description, '', tags].join('\n'), 'Post text') }, icon('copy'), 'Copy all'),
+            h('a', { class: 'btn primary', href: dl('main'), download: '' }, icon('download'),
+              r.variants?.length ? `Download ${FMT_LABEL[p.format] || ''} MP4` : 'Download MP4'))),
+        h('div', { class: 'kit-files', role: 'group', 'aria-label': 'Other downloads' }, files),
+        h('div', { class: `kit-body ${r.thumbnail_jpg ? 'has-thumb' : ''}` },
+          r.thumbnail_jpg ? h('a', { class: 'kit-thumb', href: fileUrl(p.id, r.thumbnail_jpg, encodeURIComponent(r.rendered_at)), target: '_blank', rel: 'noopener', title: 'Open the thumbnail' },
+            h('img', { src: fileUrl(p.id, r.thumbnail_jpg, encodeURIComponent(r.rendered_at)), alt: 'Thumbnail', loading: 'lazy', decoding: 'async' })) : null,
+          h('div', { class: 'kit-text' },
+            row('Title', s.title, 'Title'),
+            row('Description', s.description, 'Description'),
+            row('Hashtags', tags, 'Hashtags'),
+            h('button', { class: 'btn ghost sm kit-all', onclick: () => copyText([s.title, '', s.description, '', tags].join('\n'), 'Post text') }, icon('copy'), 'Copy all'))),
+        h('div', { class: 'kit-pub' }),
       ];
     });
+    renderPublish(p, kit.querySelector('.kit-pub'));
+  }
+
+  function renderPublish(p, box) {
+    const yt = state.youtube;
+    const busy = state.publishing.has(p.id);
+    const last = busy ? (state.logs.get(p.id) || []).at(-1) : null;
+    const formats = [p.format, ...(p.render.variants || []).map((v) => v.format)];
+    patch(box, JSON.stringify([yt?.connected, yt?.channel, p.published, formats, busy, last?.message, last?.progress, p.running]), () => {
+      const published = (p.published || []).slice().reverse().map((rec) => {
+        const scheduled = rec.publish_at && new Date(rec.publish_at) > new Date();
+        return h('li', null, icon(scheduled ? 'calendar' : 'send'),
+          h('a', { href: rec.url, target: '_blank', rel: 'noopener noreferrer' }, rec.url.replace(/^https?:\/\/(www\.)?/, ''), icon('external')),
+          h('span', { class: 'tag' }, FMT_LABEL[rec.format] || rec.format),
+          h('span', { class: 'muted' }, scheduled ? `goes ${rec.privacy} ${fmtWhen(rec.publish_at)}` : `${rec.privacy} · ${relTime(rec.uploaded_at)}`));
+      });
+      const list = published.length ? h('ul', { class: 'pub-list', 'aria-label': 'Published copies' }, published) : null;
+      if (!yt?.connected) {
+        return [h('div', { class: 'pub-connect' }, icon('send'),
+          h('div', null, h('strong', null, 'Publish to YouTube Shorts'),
+            h('p', { class: 'muted' }, 'Connect your channel once, then upload and schedule from here.')),
+          h('a', { class: 'btn sm', href: '#/settings/youtube' }, 'Connect YouTube')), list];
+      }
+      if (busy) {
+        return [h('div', { class: 'pub-busy', 'aria-live': 'polite' }, spinner(),
+          h('div', null, h('strong', null, 'Uploading to YouTube…'), h('p', { class: 'muted' }, last?.message || 'Starting the upload')),
+          last?.progress != null ? progressBar(last.progress) : null), list];
+      }
+      const pub = ui.pub;
+      if (!formats.includes(pub.format)) pub.format = p.format;
+      const at = h('input', { type: 'datetime-local', id: 'pub-at', class: 'input sm', value: pub.at, min: localInputValue(new Date()),
+        disabled: pub.privacy === 'private', title: 'Leave empty to publish now',
+        onchange: (e) => { pub.at = e.target.value; go.replaceChildren(icon(pub.at ? 'calendar' : 'send'), pub.at ? 'Schedule' : 'Publish now'); } });
+      const go = h('button', { class: 'btn primary', type: 'button', disabled: p.running, onclick: () => publishNow(p) },
+        icon(pub.at && pub.privacy !== 'private' ? 'calendar' : 'send'), pub.at && pub.privacy !== 'private' ? 'Schedule' : 'Publish now');
+      return [
+        h('div', { class: 'pub-head' },
+          h('div', null, h('h3', null, 'Publish to YouTube'),
+            h('p', { class: 'muted' }, yt.channel ? `As ${yt.channel}. ` : '', 'Uses the title, description and hashtags above.'))),
+        h('div', { class: 'pub-row' },
+          segmented({ name: 'pub-privacy', label: 'Privacy', value: pub.privacy, options: PRIVACY,
+            onchange: (v) => { pub.privacy = v; at.disabled = v === 'private'; go.replaceChildren(icon(pub.at && v !== 'private' ? 'calendar' : 'send'), pub.at && v !== 'private' ? 'Schedule' : 'Publish now'); } }),
+          h('label', { class: 'inline-field', title: 'Scheduled videos upload private and go public at this time' },
+            icon('calendar'), h('span', { class: 'sr-only' }, 'Release time'), at),
+          formats.length > 1 ? h('select', { id: 'pub-format', class: 'select sm', 'aria-label': 'Which render to upload',
+            onchange: (e) => { pub.format = e.target.value; } },
+          formats.map((f) => h('option', { value: f, selected: f === pub.format }, FMT_LONG[f] || f))) : null,
+          go),
+        list,
+      ];
+    });
+  }
+
+  async function publishNow(p) {
+    if (state.publishing.has(p.id)) return;
+    const pub = ui.pub;
+    const at = pub.privacy === 'private' ? null : localToIso(pub.at);
+    if (pub.at && pub.privacy !== 'private' && !at) { toast('Pick a valid release time.', 'error'); return; }
+    if (at && new Date(at) <= new Date()) { toast('Pick a release time in the future, or clear it to publish now.', 'error'); return; }
+    const format = pub.format || p.format;
+    if ((p.published || []).some((rec) => rec.format === format) && !(await confirmDialog({
+      title: 'Upload another copy?', body: 'This render is already on YouTube. Publishing again uploads a second copy.', ok: 'Upload again' }))) return;
+    state.publishing.add(p.id);
+    update();
+    try {
+      const rec = await api('POST', `/projects/${encodeURIComponent(p.id)}/publish`, { privacy: pub.privacy, publish_at: at, format });
+      toast(rec.publish_at ? `Scheduled for ${fmtWhen(rec.publish_at)}` : `Published as ${rec.privacy}`);
+      pub.at = '';
+      await refreshProject(p.id);
+    } catch (e) {
+      toast(e.message, 'error');
+    } finally {
+      state.publishing.delete(p.id);
+      update();
+    }
   }
 
   const onKey = (e) => {
@@ -1448,7 +1876,12 @@ function wordDiff(a, b) {
 const PANES = {
   hooks(pane, p, st, ui) {
     const blocked = editBlocked(p.id) || beatsBusy(p.id);
-    patch(pane, JSON.stringify([p.hooks, p.chosen_hook, blocked, stageStatus(p, 'hooks'), stageStatus(p, 'script')]), () => {
+    patch(pane, JSON.stringify([p.hooks, p.chosen_hook, blocked, stageStatus(p, 'hooks'), stageStatus(p, 'script'), p.kind]), () => {
+      if (p.kind === 'clip') {
+        const hk = p.hooks[0];
+        return emptyState('scissors', hk ? `“${hk.text}”` : 'From the source video',
+          hk ? `The opening line shown over the clip.${hk.why ? ` Why this moment: ${hk.why}` : ''}` : 'Clips open on the speaker’s own words, so there is no hook to pick.');
+      }
       if (!p.hooks.length) return pendingPane(p, 'hooks', 'bolt', 'Writing hook options…', 'No hooks yet', 'Hook options appear after research.');
       const best = Math.max(...p.hooks.map((x) => x.score || 0));
       const choose = async (i) => {
@@ -1489,7 +1922,8 @@ const PANES = {
     const s = p.script;
     const blocked = editBlocked(p.id) || beatsBusy(p.id);
     const later = ['beats', 'assets', 'voice', 'render'].some((x) => stageStatus(p, x) !== 'pending');
-    patch(pane, JSON.stringify([s?.text, s?.draft, s?.title, s?.description, s?.hashtags, ui.showDraft, !!ui.meta, blocked, later, stageStatus(p, 'script'), p.target_seconds]), () => {
+    const isClip = p.kind === 'clip';
+    patch(pane, JSON.stringify([s?.text, s?.draft, s?.title, s?.description, s?.hashtags, ui.showDraft, !!ui.meta, blocked, later, stageStatus(p, 'script'), p.target_seconds, isClip]), () => {
       if (!s) return pendingPane(p, 'script', 'doc', 'Writing the script…', 'No script yet', 'The script is written after you pick a hook.');
       const draft = ui.scriptDraft ?? s.text;
       const stats = h('div', { class: 'script-stats' });
@@ -1536,6 +1970,24 @@ const PANES = {
         },
       }, 'Save details');
 
+      const metaBlock = h('div', { class: 'card-inset meta' },
+        h('h3', null, 'Post details'),
+        metaField('title', 'Title', h('input', { id: 'meta-title', class: 'input', value: meta.title, disabled: blocked, maxlength: 100, oninput: onMeta('title') })),
+        metaField('description', 'Description', h('textarea', { id: 'meta-description', class: 'input', rows: 3, value: meta.description, disabled: blocked, oninput: onMeta('description') })),
+        metaField('hashtags', 'Hashtags', h('input', { id: 'meta-hashtags', class: 'input', value: meta.hashtags, disabled: blocked, placeholder: '#shorts #facts', oninput: onMeta('hashtags') })),
+        h('div', { class: 'row gap end' },
+          h('button', { class: 'btn ghost sm', type: 'button', disabled: blocked || !ui.meta, onclick: () => {
+            ui.meta = null; pane._sig = null; update();
+          } }, 'Revert details'), metaSave));
+      if (isClip) {
+        return [
+          h('div', { class: 'pane-head' }, h('div', null, h('h2', null, 'Transcript'),
+            h('p', { class: 'muted' }, 'The source video’s own captions for this moment. They become the on-screen captions.'))),
+          h('blockquote', { class: 'transcript card-inset' }, s.text || h('span', { class: 'muted' }, 'No captions in this window.')),
+          metaBlock,
+        ];
+      }
+
       let compare = null;
       if (ui.showDraft && s.draft) {
         compare = h('div', { class: 'diff card-inset' },
@@ -1551,22 +2003,19 @@ const PANES = {
         h('div', { class: 'script-box' },
           h('label', { class: 'sr-only', for: 'script-text' }, 'Script'), ta,
           h('div', { class: 'script-foot' }, h('div', { class: 'script-meter' }, stats, meter), h('div', { class: 'row gap' }, revert, save))),
-        h('div', { class: 'card-inset meta' },
-          h('h3', null, 'Post details'),
-          metaField('title', 'Title', h('input', { id: 'meta-title', class: 'input', value: meta.title, disabled: blocked, maxlength: 100, oninput: onMeta('title') })),
-          metaField('description', 'Description', h('textarea', { id: 'meta-description', class: 'input', rows: 3, value: meta.description, disabled: blocked, oninput: onMeta('description') })),
-          metaField('hashtags', 'Hashtags', h('input', { id: 'meta-hashtags', class: 'input', value: meta.hashtags, disabled: blocked, placeholder: '#shorts #facts', oninput: onMeta('hashtags') })),
-          h('div', { class: 'row gap end' },
-            h('button', { class: 'btn ghost sm', type: 'button', disabled: blocked || !ui.meta, onclick: () => {
-              ui.meta = null; pane._sig = null; update();
-            } }, 'Revert details'), metaSave)),
+        metaBlock,
       ];
     });
   },
 
   research(pane, p) {
     const r = p.research;
-    patch(pane, JSON.stringify([r, stageStatus(p, 'research')]), () => {
+    patch(pane, JSON.stringify([r, stageStatus(p, 'research'), p.kind, p.clip?.url]), () => {
+      if (p.kind === 'clip') {
+        const src = p.clip;
+        return emptyState('scissors', 'From the source video', 'Clips skip research: every word comes from the video itself.',
+          src?.url ? h('a', { class: 'btn ghost sm', href: src.url, target: '_blank', rel: 'noopener noreferrer' }, icon('external'), 'Open the source') : null);
+      }
       if (!r) return pendingPane(p, 'research', 'globe', 'Researching…', 'No research yet', 'ClipCut searches the web and writes a short briefing first.');
       const host = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return u; } };
       return [
@@ -1624,8 +2073,10 @@ const PANES = {
     });
     const counts = {};
     for (const b of p.beats) counts[b.status] = (counts[b.status] || 0) + 1;
-    patch(pane._head, JSON.stringify([counts, p.beats.length, st.kind, st.stage]), () => {
+    patch(pane._head, JSON.stringify([counts, p.beats.length, st.kind, st.stage, p.kind, p.format]), () => {
       if (!p.beats.length) return null;
+      if (p.kind === 'clip') return h('div', null, h('h2', null, 'The clip'),
+        h('p', { class: 'muted' }, `The moment from the source video, reframed to ${FMT_LONG[p.format] || p.format} with captions and sound effects.`));
       return [
         h('div', null, h('h2', null, 'Visuals'),
           h('p', { class: 'muted' }, `${p.beats.length} beats. Review while paused; pinned media is kept when re-running visuals (not when rebuilding the beat sheet). Uploads: images or video, up to 256 MiB.`)),
@@ -1640,7 +2091,7 @@ const PANES = {
       const key = `${p.id}/${b.id}`;
       const lv = state.beatLive.get(key);
       const fresh = lv && now - lv.at < 4000 ? lv.message : '';
-      return JSON.stringify([b, state.busy.get(key), fresh, ui.editing === b.id, editBlocked(p.id), ui.edits[b.id]?.kind]);
+      return JSON.stringify([b, state.busy.get(key), fresh, ui.editing === b.id, editBlocked(p.id), ui.edits[b.id]?.kind, p.format, p.kind]);
     }, (b) => beatRow(p, b, ui, now));
     ui.drawer?.render();
   },
@@ -1667,13 +2118,15 @@ function beatRow(p, b, ui, now) {
   });
   const disabled = !!busy || editBlocked(p.id);
   const editing = ui.editing === b.id;
+  // A clip's footage is the source moment itself; only its styling is editable.
+  const fixed = p.kind === 'clip';
 
   return h('article', { class: `beat st-${b.status} ${b.locked ? 'is-locked' : ''} ${working ? 'is-busy' : ''}`, 'aria-label': `Beat ${b.id}` },
-    h('div', { class: `beat-media ${p.format === 'horizontal' ? 'horizontal' : ''}` },
+    h('div', { class: `beat-media ${fmtClass(p.format)}` },
       beatMedia(p.id, b, 'media'),
       v.on_screen_text && (b.asset || v.kind !== 'text') ? h('span', { class: 'ost-overlay' }, v.on_screen_text) : null,
       working ? h('div', { class: 'media-busy' }, spinner()) : null,
-      h('button', { class: 'media-hit', 'aria-label': `Swap visual for ${b.id}`, onclick: () => openSwap(p.id, b.id, ui), disabled })),
+      fixed ? null : h('button', { class: 'media-hit', 'aria-label': `Swap visual for ${b.id}`, onclick: () => openSwap(p.id, b.id, ui), disabled })),
     h('div', { class: 'beat-main' },
       h('div', { class: 'beat-top' },
         h('span', { class: 'beat-id mono' }, b.id),
@@ -1681,7 +2134,7 @@ function beatRow(p, b, ui, now) {
         kindBadge(v.kind),
         b.asset && b.asset.provider && b.asset.provider !== PROVIDER_OF_KIND[v.kind] ? h('span', { class: 'tag mono sm' }, b.asset.provider) : null,
         h('span', { class: `bstatus bs-${b.status}` }, BEAT_STATUS[b.status] || b.status),
-        h('button', {
+        fixed ? null : h('button', {
           class: `icon-btn sm pin ${b.locked ? 'on' : ''}`, 'aria-pressed': String(b.locked), disabled: disabled || !b.asset,
           title: !b.asset ? 'Only downloaded or uploaded media can be pinned' : b.locked ? 'Pinned: re-running visuals keeps this media. Click to unpin.' : 'Pin this media so visual re-runs keep it',
           'aria-label': b.locked ? 'Unpin visual' : 'Pin visual',
@@ -1694,7 +2147,7 @@ function beatRow(p, b, ui, now) {
         v.meme?.template ? h('span', { class: 'plan-item' }, h('span', { class: 'plan-k' }, 'Template'), v.meme.template) : null),
       b.error ? h('p', { class: `beat-err ${b.status === 'failed' ? 'err-text' : 'warn-text'}` }, icon('alert'), b.error) : null,
       working ? h('p', { class: 'beat-live' }, spinner('xs'), busy ? `${busy}…` : liveMsg?.message || 'Searching…') : null),
-    h('div', { class: 'beat-actions' },
+    fixed ? null : h('div', { class: 'beat-actions' },
       h('button', { class: 'btn sm', disabled, onclick: () => openSwap(p.id, b.id, ui) }, icon('swap'), 'Swap'),
       h('button', {
         class: 'btn ghost sm', disabled, title: 'Re-run the automatic search and pick for this beat (unpins it)',
@@ -1809,7 +2262,7 @@ function openSwap(pid, beatId, ui) {
       });
       return [
         h('div', { class: 'swap-current' },
-          h('div', { class: `swap-thumb ${p.format === 'horizontal' ? 'horizontal' : ''}` }, beatMedia(pid, b, 'media')),
+          h('div', { class: `swap-thumb ${fmtClass(p.format)}` }, beatMedia(pid, b, 'media')),
           h('div', { class: 'swap-cur-info' },
             h('div', { class: 'row gap wrap' }, kindBadge(b.visual.kind), h('span', { class: `bstatus bs-${b.status}` }, BEAT_STATUS[b.status]), b.locked ? h('span', { class: 'tag' }, icon('lock'), 'Pinned') : null),
             b.asset?.credit ? h('p', { class: 'muted sm' }, b.asset.credit) : h('p', { class: 'muted sm' }, b.asset ? b.asset.provider : 'No asset yet'),
@@ -1837,7 +2290,7 @@ function openSwap(pid, beatId, ui) {
         busy === 'Searching'
           ? h('div', { class: 'cands' }, Array.from({ length: 6 }, () => h('div', { class: 'cand skeleton' })))
           : b.candidates.length
-            ? h('div', { class: `cands ${p.format === 'horizontal' ? 'horizontal' : ''}` }, b.candidates.map((c, i) => h('div', { class: `cand ${b.chosen === i ? 'chosen' : ''} ${local.choosing === i ? 'choosing' : ''}` },
+            ? h('div', { class: `cands ${fmtClass(p.format)}` }, b.candidates.map((c, i) => h('div', { class: `cand ${b.chosen === i ? 'chosen' : ''} ${local.choosing === i ? 'choosing' : ''}` },
               h('button', {
                 type: 'button', class: 'cand-btn', disabled: blocked, 'aria-label': `Use ${c.title}`,
                 onclick: () => choose(i),
@@ -1863,9 +2316,230 @@ function openSwap(pid, beatId, ui) {
   requestAnimationFrame(() => $('#swap-query, #swap-text', dlg)?.focus({ preventScroll: true }));
 }
 
+// ------------------------------------------------------------- queue view --
+
+const QUEUE_STATUS = {
+  waiting: ['Waiting', 'chip-idle'], running: ['Making', 'chip-running'], done: ['Done', 'chip-done'],
+  failed: ['Failed', 'chip-failed'], cancelled: ['Cancelled', 'chip-paused'],
+};
+const QUEUE_MAX = 200;
+
+function QueueView() {
+  const form = {
+    topics: sessionStorage.getItem('cc-draft-queue') || '',
+    format: state.config?.video?.format || 'vertical', formatTouched: false,
+    seconds: '', voice: '', captions: '', also: [],
+    pub: { on: false, privacy: 'public', at: '', everyHours: '' },
+    busy: false,
+  };
+  const acting = new Set(); // queue item ids with a request in flight
+  refreshQueue();
+
+  // Same rule as `clipcut batch`: one topic per line, blank and # lines skipped.
+  const lines = () => form.topics.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
+  const topics = h('textarea', {
+    id: 'queue-topics', class: 'queue-topics', rows: 5, spellcheck: 'true', value: form.topics,
+    placeholder: 'One topic per line\nWhy octopuses have three hearts\nThe 1904 Olympic marathon',
+    oninput: (e) => { form.topics = e.target.value; sessionStorage.setItem('cc-draft-queue', form.topics); syncAdd(); },
+    onkeydown: (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(); } },
+  });
+  const add = h('button', { type: 'submit', class: 'btn primary' });
+  const count = h('span', { class: 'muted sm', 'aria-live': 'polite' });
+  const syncAdd = () => {
+    const n = lines().length;
+    add.disabled = form.busy || !n || n > QUEUE_MAX;
+    add.replaceChildren(form.busy ? spinner('dark') : icon('plus'), n > 1 ? `Queue ${n} videos` : 'Queue video');
+    count.textContent = n > QUEUE_MAX ? `${n} topics; the limit is ${QUEUE_MAX} at once` : n ? `${n} topic${n === 1 ? '' : 's'}` : '';
+    count.classList.toggle('err-text', n > QUEUE_MAX);
+  };
+
+  async function submit(e) {
+    e?.preventDefault();
+    const list = lines();
+    if (!list.length || form.busy) { topics.focus(); return; }
+    if (list.length > QUEUE_MAX) { toast(`Queue at most ${QUEUE_MAX} topics at once.`, 'error'); return; }
+    if (form.pub.on && form.pub.at && !(new Date(form.pub.at) > Date.now())) {
+      toast('Pick a first release time in the future, or leave it empty to publish on render.', 'error');
+      return;
+    }
+    form.busy = true;
+    syncAdd();
+    try {
+      const added = await api('POST', '/queue', {
+        topics: list, format: form.format, target_seconds: form.seconds ? Number(form.seconds) : undefined,
+        voice: form.voice || undefined, caption_preset: form.captions || undefined,
+        extra_formats: form.also.length ? form.also : undefined, ...publishBody(form.pub),
+      });
+      form.topics = '';
+      topics.value = '';
+      sessionStorage.removeItem('cc-draft-queue');
+      toast(`Queued ${added.length} video${added.length === 1 ? '' : 's'}`);
+      refreshQueue();
+    } catch (err) { toast(err.message, 'error'); }
+    form.busy = false;
+    syncAdd();
+  }
+
+  const formatSeg = segmented({ name: 'queue-format', label: 'Format', value: form.format, options: FORMATS.map(([v, ratio, ic]) => [v, ratio, ic]),
+    onchange: (v) => { form.format = v; form.formatTouched = true; form.also = form.also.filter((f) => f !== v); update(); } });
+  const lengthSel = h('select', { id: 'queue-length', class: 'select sm', 'aria-label': 'Length', onchange: (e) => { form.seconds = e.target.value; } });
+  const voiceSel = h('select', { id: 'queue-voice', class: 'select sm', 'aria-label': 'Voice', onchange: (e) => { form.voice = e.target.value; } });
+  const alsoWrap = h('div', { class: 'also-wrap' });
+  const pubWrap = h('div', { class: 'clip-pub' });
+  const ideas = ideasPicker((idea) => {
+    if (lines().includes(idea.title)) { toast('Already in the list'); return; }
+    const kept = form.topics.trimEnd();
+    form.topics = kept ? `${kept}\n${idea.title}` : idea.title;
+    topics.value = form.topics;
+    sessionStorage.setItem('cc-draft-queue', form.topics);
+    syncAdd();
+  }, { id: 'queue-ideas' });
+
+  const composer = h('form', { class: 'composer queue-composer', onsubmit: submit },
+    h('label', { class: 'field-label', for: 'queue-topics' }, 'Topics'),
+    topics,
+    h('div', { class: 'composer-bar' },
+      h('div', { class: 'composer-opts' },
+        formatSeg,
+        h('div', { class: 'with-icon' }, icon('film'), lengthSel),
+        h('div', { class: 'with-icon' }, icon('volume'), voiceSel),
+        h('div', { class: 'with-icon' }, icon('text'), captionSelect({ id: 'queue-captions', value: form.captions, onchange: (v) => { form.captions = v; } })),
+        alsoWrap),
+      h('div', { class: 'row gap' }, count, add)),
+    pubWrap);
+  syncAdd();
+
+  const head = h('div', { class: 'section-head queue-head' });
+  const list = h('ol', { class: 'queue-list' });
+  const listWrap = h('div', { class: 'queue-items' });
+  const el = h('div', { class: 'page queue' },
+    h('header', { class: 'shead' }, h('h1', null, 'Queue'),
+      h('p', { class: 'muted' }, 'Line up topics and ClipCut makes them one after another, each on autopilot. Leave it running and publish as they finish.')),
+    composer, ideas,
+    h('section', { class: 'queue-section' }, head, listWrap));
+
+  async function act(item, what, method, path, body) {
+    if (acting.has(item.id)) return;
+    acting.add(item.id);
+    update();
+    try {
+      const q = await api(method, path, body);
+      if (q?.items) state.queue = q;
+      if (what) toast(what);
+    } catch (e) { toast(e.message, 'error'); }
+    acting.delete(item.id);
+    refreshQueue();
+  }
+  async function remove(item) {
+    if (item.status === 'running' && !(await confirmDialog({ title: 'Stop this video?', body: 'The pipeline is cancelled and the item is marked cancelled. Its project keeps whatever was finished, so Retry picks up from there.', ok: 'Stop', danger: true }))) return;
+    act(item, item.status === 'running' ? 'Stopped' : null, 'DELETE', `/queue/${encodeURIComponent(item.id)}`);
+  }
+  async function setPaused(paused) {
+    try {
+      state.queue = await api('PATCH', '/queue', { paused });
+      toast(paused ? 'Queue paused. The current video still finishes.' : 'Queue resumed');
+    } catch (e) { toast(e.message, 'error'); }
+    update();
+  }
+  async function clearFinished() {
+    try {
+      const { removed } = await api('POST', '/queue/clear');
+      toast(removed ? `Cleared ${removed} finished item${removed === 1 ? '' : 's'}` : 'Nothing to clear');
+    } catch (e) { toast(e.message, 'error'); }
+    refreshQueue();
+  }
+
+  function row(item, i) {
+    const [label, chip] = QUEUE_STATUS[item.status] || [item.status, 'chip-idle'];
+    const project = item.project_id ? state.projects?.find((p) => p.id === item.project_id) : null;
+    const live = item.status === 'running' && item.project_id ? state.live.get(item.project_id) : null;
+    const plan = item.publish;
+    const busy = acting.has(item.id);
+    const preset = CAPTION_PRESETS.find(([v]) => v === item.caption_preset)?.[1];
+    const title = project?.title || item.topic;
+    return h('li', { class: `qitem q-${item.status}` },
+      h('span', { class: 'qnum mono', 'aria-hidden': 'true' }, i + 1),
+      h('div', { class: 'qbody' },
+        h('div', { class: 'qtopic' }, item.project_id ? h('a', { href: `#/p/${encodeURIComponent(item.project_id)}` }, title) : title),
+        h('div', { class: 'qmeta' },
+          h('span', { class: `chip ${chip}` }, item.status === 'running' ? h('span', { class: 'dot' }) : null,
+            item.status === 'done' ? icon('check') : item.status === 'failed' ? icon('alert') : null, label),
+          project?.kind === 'clip' ? h('span', { class: 'fmt-tag clip-tag' }, icon('scissors'), 'Clip') : null,
+          h('span', { class: 'fmt-tag' }, [item.format || state.config?.video?.format || 'vertical', ...(item.extra_formats || [])].map((f) => FMT_LABEL[f] || f).join(' + ')),
+          item.target_seconds ? h('span', { class: 'muted sm' }, `${item.target_seconds}s`) : null,
+          preset ? h('span', { class: 'muted sm' }, `${preset} captions`) : null,
+          plan ? h('span', { class: 'pub-tag', title: plan.publish_at ? `Goes ${plan.privacy} ${fmtWhen(plan.publish_at)}` : `Publishes as ${plan.privacy} when it renders` },
+            icon(plan.publish_at ? 'calendar' : 'send'), plan.publish_at ? fmtWhen(plan.publish_at) : `Publish ${plan.privacy}`) : null,
+          h('span', { class: 'muted sm nowrap' }, item.finished_at ? relTime(item.finished_at) : item.started_at ? `started ${relTime(item.started_at)}` : `added ${relTime(item.added_at)}`)),
+        live ? h('div', { class: 'qlive muted sm ellipsis' }, live.message) : null,
+        item.error && item.status !== 'cancelled' ? h('div', { class: 'qerr', title: item.error }, icon('alert'), h('span', { class: 'ellipsis' }, item.error)) : null,
+        item.video_url && safeLink(item.video_url) ? h('a', { class: 'link sm', href: item.video_url, target: '_blank', rel: 'noopener noreferrer' }, icon('youtube'), 'Watch on YouTube', icon('external')) : null),
+      h('div', { class: 'qactions' },
+        item.status === 'failed' || item.status === 'cancelled' ? h('button', { type: 'button', class: 'btn ghost sm', disabled: busy,
+          onclick: () => act(item, 'Back in line', 'POST', `/queue/${encodeURIComponent(item.id)}/retry`) }, busy ? spinner() : icon('rerun'), 'Retry') : null,
+        h('button', { type: 'button', class: `icon-btn sm ${item.status === 'running' ? 'danger-text' : ''}`, disabled: busy,
+          'aria-label': `${item.status === 'running' ? 'Stop' : 'Remove'} “${title}”`, title: item.status === 'running' ? 'Stop' : 'Remove',
+          onclick: () => remove(item) }, icon(item.status === 'running' ? 'stop' : 'x'))));
+  }
+
+  return {
+    el,
+    hasUnsaved: () => false,
+    update() {
+      const cfg = state.config;
+      if (cfg && !form.formatTouched && form.format !== cfg.video.format) {
+        form.format = cfg.video.format;
+        formatSeg.setValue(form.format);
+        form.also = form.also.filter((f) => f !== form.format);
+      }
+      patch(lengthSel, `${cfg?.video?.target_seconds}`, () => [
+        h('option', { value: '', selected: !form.seconds }, `Default length (${cfg?.video?.target_seconds || 45}s)`),
+        [30, 45, 60, 90, 120, 180].map((n) => h('option', { value: n, selected: String(n) === form.seconds }, `${n}s`)),
+      ]);
+      patch(voiceSel, `${state.voices.length}|${cfg?.tts?.voice}`, () => voiceOptions(form.voice));
+      patch(alsoWrap, JSON.stringify([form.format, form.also]), () => alsoExport({ id: 'queue-also', main: form.format, value: form.also,
+        onchange: (v) => { form.also = v; update(); } }));
+      patch(pubWrap, JSON.stringify([state.youtube?.connected, state.youtube?.channel, form.pub]), () =>
+        publishOptions(form.pub, { id: 'queue-pub', onchange: update }));
+
+      const q = state.queue;
+      const items = q?.items || [];
+      const running = items.find((i) => i.status === 'running');
+      const waiting = items.filter((i) => i.status === 'waiting').length;
+      const finished = items.filter((i) => !['waiting', 'running'].includes(i.status)).length;
+      patch(head, JSON.stringify([!!q, q?.paused, items.length, waiting, !!running, finished]), () => [
+        h('h2', null, 'Line-up'), items.length ? h('span', { class: 'count' }, items.length) : null,
+        q ? h('span', { class: `queue-state muted sm ${q.paused ? 'warn-text' : ''}` },
+          q.paused ? (running ? 'Paused after the current video' : 'Paused') : running ? `Making 1, ${waiting} waiting` : waiting ? `${waiting} waiting` : items.length ? 'All done' : '') : null,
+        h('div', { class: 'row gap push' },
+          q && (items.length || q.paused) ? h('button', { type: 'button', class: 'btn ghost sm', onclick: () => setPaused(!q.paused) },
+            icon(q.paused ? 'play' : 'pause'), q.paused ? 'Resume' : 'Pause') : null,
+          finished ? h('button', { type: 'button', class: 'btn ghost sm', onclick: clearFinished }, icon('trash'), 'Clear finished') : null),
+      ]);
+      if (state.queueError && !q) {
+        patch(listWrap, `err:${state.queueError}`, () => errorState(state.queueError, refreshQueue));
+        return;
+      }
+      if (!q) { patch(listWrap, 'loading', () => h('div', { class: 'loading-page' }, spinner('lg'), 'Loading the queue…')); return; }
+      if (!items.length) {
+        patch(listWrap, 'empty', () => emptyState('list', 'Nothing queued', 'Add a few topics above, or find clips in a long video from the home page. They render here one at a time.'));
+        return;
+      }
+      patch(listWrap, 'list', () => list);
+      keyed(list, items, (i) => i.id, (item) => {
+        const live = item.status === 'running' && item.project_id ? state.live.get(item.project_id)?.message : null;
+        const project = item.project_id ? state.projects?.find((p) => p.id === item.project_id) : null;
+        return JSON.stringify([item, items.indexOf(item), live, project?.title, project?.kind, acting.has(item.id), Math.floor(Date.now() / 60000)]);
+      }, (item) => row(item, items.indexOf(item)));
+    },
+    unmount() { disposeTree(el); },
+  };
+}
+
 // ---------------------------------------------------------- settings view --
 
-const SETTINGS_TABS = [['setup', 'Setup', 'wrench'], ['keys', 'API keys', 'key'], ['prefs', 'Preferences', 'sliders']];
+const SETTINGS_TABS = [['setup', 'Setup', 'wrench'], ['keys', 'API keys', 'key'], ['prefs', 'Preferences', 'sliders'], ['youtube', 'YouTube', 'send']];
+const GCP = 'https://console.cloud.google.com';
 const SETUP_TARGETS = [
   ['yt-dlp', 'yt-dlp', 'Downloads short YouTube cuts. Standalone binary, no Python.'],
   ['kokoro', 'Kokoro voice', 'Natural local text-to-speech (about 330 MB of model files).'],
@@ -1875,7 +2549,8 @@ const MAX_KEYS = 5;
 const KEY_STATE = { ready: ['Ready', 'ok'], cooling_down: ['Cooling down', 'warn'], invalid: ['Invalid', 'bad'] };
 
 function SettingsView(initialTab) {
-  const ui = { tab: SETTINGS_TABS.some(([t]) => t === initialTab) ? initialTab : 'setup', keyEdits: {}, cfg: null, cfgDirty: false, cfgSaving: false };
+  const ui = { tab: SETTINGS_TABS.some(([t]) => t === initialTab) ? initialTab : 'setup', keyEdits: {}, cfg: null, cfgDirty: false, cfgSaving: false,
+    yt: { client: '', paste: '', busy: null, poll: null } };
   const tabs = h('div', { class: 'tabs', role: 'tablist', 'aria-label': 'Settings sections' });
   const panes = Object.fromEntries(SETTINGS_TABS.map(([t]) => [t, h('section', { class: `pane spane-${t}`, role: 'tabpanel', id: `spane-${t}`,
     'aria-labelledby': `stab-${t}`, tabindex: 0, hidden: true })]));
@@ -1885,6 +2560,7 @@ function SettingsView(initialTab) {
 
   if (!state.keys) loadKeys();
   refreshStatus();
+  refreshYoutube();
 
   function setTab(t) {
     if (!SETTINGS_TABS.some(([id]) => id === t)) return;
@@ -1910,7 +2586,7 @@ function SettingsView(initialTab) {
       },
     }, icon(ic), label, t === 'setup' && state.status && !state.status.ready ? h('span', { class: 'count warn' }, state.status.checks.filter((c) => !c.ok && c.required !== false).length) : null)));
     for (const [t, pane] of Object.entries(panes)) pane.hidden = t !== ui.tab;
-    ({ setup: renderSetup, keys: renderKeys, prefs: renderPrefs })[ui.tab](panes[ui.tab]);
+    ({ setup: renderSetup, keys: renderKeys, prefs: renderPrefs, youtube: renderYoutube })[ui.tab](panes[ui.tab]);
   }
 
   // ---- setup / doctor
@@ -2093,6 +2769,147 @@ function SettingsView(initialTab) {
           h('button', { type: 'button', class: 'btn primary sm', disabled: savingAny, onclick: save }, saving ? spinner('dark') : icon('check'), 'Save'))) : null);
   }
 
+  // ---- YouTube publishing
+  function watchSignIn() {
+    clearInterval(ui.yt.poll);
+    const until = Date.now() + 180_000;
+    ui.yt.poll = setInterval(async () => {
+      const s = await refreshYoutube();
+      if (s?.connected) toast(`Connected to ${s.channel || 'YouTube'}`);
+      if (s?.connected || !s?.connecting || Date.now() > until) { clearInterval(ui.yt.poll); ui.yt.poll = null; }
+    }, 2000);
+  }
+  function renderYoutube(pane) {
+    const yt = state.youtube;
+    const y = ui.yt;
+    patch(pane, JSON.stringify([yt, y.busy]), () => {
+      if (!yt) return h('div', { class: 'loading-page' }, spinner('lg'), 'Checking YouTube…');
+      const busy = !!y.busy;
+      const remote = !['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+      const ext = (href, text) => h('a', { class: 'link', href, target: '_blank', rel: 'noopener noreferrer' }, text, icon('external'));
+      const act = async (what, fn) => {
+        if (y.busy) return;
+        y.busy = what;
+        update();
+        try { await fn(); } catch (e) { toast(e.message, 'error'); }
+        y.busy = null;
+        update();
+      };
+      const connect = () => act('connect', async () => {
+        // Open the tab inside the click so popup blockers let it through.
+        const win = window.open('about:blank', '_blank');
+        if (win) win.opener = null;
+        let url;
+        try { ({ url } = await api('POST', '/publish/youtube/connect')); } catch (e) { win?.close(); throw e; }
+        if (win && !win.closed) win.location.href = url; else window.open(url, '_blank', 'noopener');
+        await refreshYoutube();
+        watchSignIn();
+      });
+      const disconnect = async () => {
+        if (!(await confirmDialog({ title: 'Disconnect YouTube?', body: 'ClipCut signs out and gives up its access. Videos you already uploaded stay on YouTube.', ok: 'Disconnect', danger: true }))) return;
+        act('disconnect', async () => { state.youtube = await api('DELETE', '/publish/youtube'); toast('YouTube disconnected'); });
+      };
+      const forget = async () => {
+        if (!(await confirmDialog({ title: 'Forget the OAuth client?', body: 'ClipCut signs out of YouTube and deletes the saved client ID and secret. Add the client again to publish.', ok: 'Forget client', danger: true }))) return;
+        act('forget', async () => { state.youtube = await api('DELETE', '/publish/youtube?all=true'); toast('OAuth client removed'); });
+      };
+      const finish = () => act('paste', async () => {
+        const url = y.paste.trim();
+        if (!url) return;
+        state.youtube = await api('POST', '/publish/youtube/callback-url', { url });
+        y.paste = '';
+        clearInterval(y.poll);
+        if (state.youtube.connected) toast(`Connected to ${state.youtube.channel || 'YouTube'}`);
+      });
+      const saveClient = () => act('client', async () => {
+        const json = y.client.trim();
+        if (!json) return;
+        state.youtube = await api('PUT', '/publish/youtube', { client_json: json });
+        y.client = '';
+        toast('OAuth client saved');
+      });
+
+      const status = yt.connected
+        ? h('div', { class: 'doctor-head card ok' }, h('div', { class: 'doctor-icon' }, icon('check')),
+          h('div', { class: 'grow' },
+            h('h2', null, yt.channel ? `Connected to ${yt.channel}` : 'Connected to YouTube'),
+            h('p', { class: 'muted' }, yt.connected_at ? `Signed in ${relTime(yt.connected_at)}. ` : '',
+              'Finished videos get a Publish button, and the queue can publish as it goes.',
+              yt.channel_id ? [' ', ext(`https://studio.youtube.com/channel/${encodeURIComponent(yt.channel_id)}`, 'YouTube Studio')] : null)),
+          h('div', { class: 'row gap wrap' },
+            h('button', { type: 'button', class: 'btn ghost sm', disabled: busy, onclick: connect }, y.busy === 'connect' ? spinner() : icon('rerun'), 'Reconnect'),
+            h('button', { type: 'button', class: 'btn ghost sm danger-text', disabled: busy, onclick: disconnect }, y.busy === 'disconnect' ? spinner() : icon('x'), 'Disconnect')))
+        : h('div', { class: 'doctor-head card warn' }, h('div', { class: 'doctor-icon' }, icon(yt.configured ? 'send' : 'alert')),
+          h('div', { class: 'grow' },
+            h('h2', null, yt.connecting ? 'Waiting for Google…' : yt.configured ? 'Ready to connect' : 'Not set up yet'),
+            h('p', { class: 'muted' }, yt.connecting ? 'Finish signing in on the Google tab. This page updates when you are done.'
+              : yt.configured ? 'Sign in with the Google account that owns your channel.'
+                : 'Publishing uses your own free Google OAuth client. Follow the steps below once, then connect.')),
+          yt.configured ? h('button', { type: 'button', class: 'btn primary', disabled: busy, onclick: connect },
+            y.busy === 'connect' || yt.connecting ? spinner('dark') : icon('send'), yt.connecting ? 'Open sign-in again' : 'Connect YouTube') : null);
+
+      const paste = yt.connecting || (remote && yt.configured && !yt.connected) ? h('div', { class: 'card yt-paste' },
+        h('label', { class: 'field-label', for: 'yt-paste' }, remote ? 'Signing in from another device?' : 'Sign-in page didn’t load?'),
+        h('p', { class: 'muted sm' }, 'After you allow access, Google sends the browser to an http://127.0.0.1 address, which only loads on the computer running ClipCut. ',
+          'If that page fails, copy its full address from the address bar and paste it here.'),
+        h('div', { class: 'row gap' },
+          h('input', { id: 'yt-paste', class: 'input mono grow', value: y.paste, spellcheck: 'false', autocomplete: 'off', disabled: !yt.connecting,
+            placeholder: yt.connecting ? 'http://127.0.0.1:…/?state=…&code=…' : 'Press Connect YouTube first',
+            oninput: (e) => { y.paste = e.target.value; }, onkeydown: (e) => { if (e.key === 'Enter') { e.preventDefault(); finish(); } } }),
+          h('button', { type: 'button', class: 'btn sm', disabled: busy || !yt.connecting, onclick: finish }, y.busy === 'paste' ? spinner() : icon('check'), 'Finish sign-in'))) : null;
+
+      const save = h('button', { type: 'submit', class: 'btn primary sm', disabled: busy || !y.client.trim() },
+        y.busy === 'client' ? spinner('dark') : icon('check'), yt.configured ? 'Replace client' : 'Save client');
+      const sync = () => { save.disabled = !!y.busy || !y.client.trim(); };
+      const area = h('textarea', { id: 'yt-client', class: 'input mono', rows: 4, spellcheck: 'false', autocomplete: 'off', value: y.client,
+        placeholder: '{"installed":{"client_id":"….apps.googleusercontent.com","client_secret":"…"}}',
+        oninput: (e) => { y.client = e.target.value; sync(); } });
+      const file = h('input', { type: 'file', id: 'yt-client-file', class: 'sr-only', accept: '.json,application/json',
+        onchange: async (e) => {
+          const f = e.target.files?.[0];
+          e.target.value = '';
+          if (!f) return;
+          if (f.size > 64 * 1024) { toast('That file is too big to be an OAuth client JSON.', 'error'); return; }
+          y.client = await f.text();
+          area.value = y.client;
+          sync();
+        } });
+      const client = h('form', { class: 'card yt-client', onsubmit: (e) => { e.preventDefault(); saveClient(); } },
+        h('div', { class: 'pane-head' },
+          h('div', null, h('h2', null, 'OAuth client'),
+            h('p', { class: 'muted sm' }, yt.configured
+              ? ['Saved: ', h('code', null, yt.client_id || 'client'), '. The secret stays on this computer and is never shown again.']
+              : 'Free, from your own Google Cloud project. The secret stays on this computer.')),
+          yt.configured ? h('button', { type: 'button', class: 'btn ghost sm danger-text', disabled: busy, onclick: forget }, y.busy === 'forget' ? spinner() : icon('trash'), 'Forget client') : null),
+        h('label', { class: 'field-label', for: 'yt-client' }, yt.configured ? 'Replace it with another client JSON' : 'Client JSON'),
+        area,
+        h('div', { class: 'row gap between wrap' },
+          h('label', { class: 'btn ghost sm', for: 'yt-client-file' }, icon('upload'), 'Choose the downloaded file…', file), save));
+
+      const steps = h('section', { class: 'card yt-steps' },
+        h('h2', null, 'One-time setup, about 10 minutes'),
+        h('ol', { class: 'steps' },
+          h('li', null, ext(`${GCP}/projectcreate`, 'Create a Google Cloud project'), '. Any name works, and no billing account is needed.'),
+          h('li', null, 'Enable the ', ext(`${GCP}/apis/library/youtube.googleapis.com`, 'YouTube Data API v3'), ' for that project.'),
+          h('li', null, 'Set up the ', ext(`${GCP}/apis/credentials/consent`, 'OAuth consent screen'), ': choose External, then add your own Google account under Test users.'),
+          h('li', null, 'Open ', ext(`${GCP}/apis/credentials`, 'Credentials'), ' and pick Create credentials → OAuth client ID → ', h('strong', null, 'Desktop app'), '. Download the JSON.'),
+          h('li', null, 'Paste the JSON above or choose the file, save it, then press Connect YouTube.')));
+
+      const limit = (ic, title, ...body) => h('li', null, icon(ic), h('div', null, h('strong', null, title), ' ', body));
+      const limits = h('section', { class: 'card yt-limits' },
+        h('h2', null, 'What Google allows'),
+        h('ul', { class: 'limits' },
+          limit('lock', 'Uploads are private until Google audits your project.', 'YouTube locks videos uploaded through an unaudited API project to private. ',
+            ext('https://support.google.com/youtube/contact/yt_api_form', 'Request the free audit'), ' to publish publicly or on a schedule.'),
+          limit('calendar', 'Test sign-ins last 7 days.', 'While the consent screen is in Testing, reconnect once a week, or push it to production and click through the “unverified app” warning.'),
+          limit('bolt', 'About 6 uploads a day.', 'The free quota is 10,000 units a day and each upload costs about 1,600.'),
+          limit('image', 'Custom thumbnails need a verified channel.', 'ClipCut sets one on 16:9 uploads; Shorts show a frame YouTube picks.'),
+          limit('phone', 'TikTok isn’t supported.', 'Its posting API needs an app TikTok has audited, and unaudited apps can only post privately. Download the 9:16 MP4 from the Post kit and upload it in the TikTok app.')));
+
+      return [status, paste, client, steps, limits];
+    });
+  }
+
   // ---- preferences
   function renderPrefs(pane) {
     if (!state.config) {
@@ -2179,8 +2996,9 @@ function SettingsView(initialTab) {
         select('llm', 'unslop_preset', 'Unslop style', [['crisp', 'Crisp: short, punchy'], ['warm', 'Warm: friendly, human'], ['expert', 'Expert: precise, confident'], ['story', 'Story: narrative, vivid']], 'The rewrite pass that removes AI-sounding phrasing.'),
         h('div', { class: 'field span' }, sw('llm', 'skip_unslop', 'Skip the unslop pass', 'Faster, but scripts sound more generic'))),
       group('Video', 'film', null,
-        select('video', 'format', 'Default format', [['vertical', '9:16 vertical (Shorts, Reels, TikTok)'], ['horizontal', '16:9 horizontal']]),
-        num('video', 'target_seconds', 'Default length (seconds)', null, { min: 10, max: 180, step: 5 }),
+        select('video', 'format', 'Default format', [['vertical', '9:16 vertical (Shorts, Reels, TikTok)'], ['horizontal', '16:9 horizontal'], ['square', '1:1 square (feeds)']]),
+        num('video', 'target_seconds', 'Default length (seconds)', null, { min: 10, max: 600, step: 5 }),
+        select('video', 'caption_preset', 'Caption style', CAPTION_PRESETS.map(([v, label, desc]) => [v, `${label}: ${desc}`]), 'New projects use this unless you pick another.'),
         select('video', 'fps', 'Frame rate', [[24, '24 fps'], [25, '25 fps'], [30, '30 fps'], [60, '60 fps']]),
         num('video', 'crf', 'Quality (CRF)', 'Lower is better and bigger. 18–23 is a good range.', { min: 10, max: 35, step: 1 }),
         h('div', { class: 'field span' }, sw('video', 'captions', 'Burn in captions', 'Word-by-word animated captions'))),
@@ -2208,10 +3026,10 @@ function SettingsView(initialTab) {
   return {
     el,
     settingsTab: () => ui.tab,
-    hasUnsaved: () => ui.cfgDirty || Object.keys(ui.keyEdits).some(isDirty),
+    hasUnsaved: () => ui.cfgDirty || Object.keys(ui.keyEdits).some(isDirty) || !!ui.yt.client.trim(),
     setTab: (t) => { if (t && t !== ui.tab) setTab(t); },
     update: render,
-    unmount() { for (const sid of Object.keys(ui.keyEdits)) clearKeyDraft(sid); disposeTree(el); },
+    unmount() { clearInterval(ui.yt.poll); ui.yt.client = ''; for (const sid of Object.keys(ui.keyEdits)) clearKeyDraft(sid); disposeTree(el); },
   };
 }
 
@@ -2230,6 +3048,7 @@ function parseRoute() {
   let parts;
   try { parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent); } catch { return { name: 'home' }; }
   if (parts[0] === 'p' && parts[1]) return { name: 'project', id: parts[1], tab: TABS.some(([t]) => t === parts[2]) ? parts[2] : null };
+  if (parts[0] === 'queue') return { name: 'queue' };
   if (parts[0] === 'settings') return { name: 'settings', tab: SETTINGS_TABS.some(([t]) => t === parts[1]) ? parts[1] : 'setup' };
   return { name: 'home' };
 }
@@ -2240,13 +3059,13 @@ function mount() {
   const route = parseRoute();
   const prev = currentRoute;
   if (currentView && prev.name === route.name) {
-    if (route.name === 'home') { currentRoute = route; update(); return; }
+    if (route.name === 'home' || route.name === 'queue') { currentRoute = route; update(); return; }
     if (route.name === 'project' && currentView.projectId === route.id) { currentRoute = route; currentView.setTab(route.tab); update(); return; }
     if (route.name === 'settings') { currentRoute = route; currentView.setTab(route.tab); update(); return; }
   }
   if (currentView?.hasUnsaved?.() && !window.confirm('Discard your unsaved edits and leave this page?')) {
     const old = prev.name === 'project' ? `#/p/${encodeURIComponent(prev.id)}${prev.tab ? `/${prev.tab}` : ''}`
-      : prev.name === 'settings' ? `#/settings/${prev.tab}` : '#/';
+      : prev.name === 'settings' ? `#/settings/${prev.tab}` : prev.name === 'queue' ? '#/queue' : '#/';
     history.replaceState(null, '', old);
     return;
   }
@@ -2255,14 +3074,17 @@ function mount() {
   const app = $('#app');
   currentView = route.name === 'project' ? ProjectView(route.id, route.tab)
     : route.name === 'settings' ? SettingsView(route.tab)
-      : HomeView();
-  if (route.name !== 'project') document.title = route.name === 'settings' ? 'Settings · ClipCut' : 'ClipCut';
+      : route.name === 'queue' ? QueueView()
+        : HomeView();
+  if (route.name !== 'project') {
+    document.title = route.name === 'settings' ? 'Settings · ClipCut' : route.name === 'queue' ? 'Queue · ClipCut' : 'ClipCut';
+  }
   app.replaceChildren(currentView.el);
   app.classList.remove('enter');
   void app.offsetWidth;
   app.classList.add('enter');
   window.scrollTo({ top: 0 });
-  if (route.name === 'home') refreshProjects();
+  if (route.name === 'home' || route.name === 'queue') refreshProjects();
   update();
 }
 
@@ -2272,6 +3094,7 @@ document.addEventListener('visibilitychange', () => {
   refreshProjects();
   if (currentView?.projectId) refreshProject(currentView.projectId);
   refreshStatus();
+  refreshQueue();
 });
 $('.skip').addEventListener('click', (e) => { e.preventDefault(); $('#app').focus(); });
 window.addEventListener('beforeunload', (e) => {
@@ -2281,6 +3104,7 @@ window.addEventListener('beforeunload', (e) => {
 setInterval(() => {
   if (document.visibilityState !== 'visible' || state.sse === 'up') return;
   refreshProjects();
+  refreshQueue();
   if (currentView?.projectId) refreshProject(currentView.projectId);
 }, 8000); // keep cancel/retry status usable while live updates reconnect
 setInterval(update, 60_000); // relative times
@@ -2290,4 +3114,6 @@ refreshStatus();
 refreshProjects();
 loadConfig();
 loadVoices();
+refreshQueue();
+refreshYoutube();
 mount();

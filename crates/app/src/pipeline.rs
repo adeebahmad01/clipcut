@@ -10,7 +10,10 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use chrono::Utc;
+use clipcut_core::config::Format;
+use clipcut_core::model::{ProjectKind, RenderVariant, Subtitles};
 use clipcut_core::paths::ProjectPaths;
+use clipcut_core::subtitles;
 use clipcut_core::timeline::Timeline;
 use clipcut_core::{
     Asset, AssetKind, Beat, BeatStatus, Candidate, Progress, Project, RenderOutput, SourceRef,
@@ -45,6 +48,10 @@ pub async fn start(
         !state.project_busy(id),
         "a visual request is still running; wait before starting the pipeline"
     );
+    anyhow::ensure!(
+        !state.publish.is_uploading(id),
+        "this project is uploading to YouTube; wait for it to finish"
+    );
     let project = state.store.get(id)?;
     let first = match from {
         Some(stage) => stage,
@@ -52,6 +59,12 @@ pub async fn start(
             Some(stage) => stage,
             None => bail!("every stage is done; pick a stage to re-run"),
         },
+    };
+    // A clip's script and beat come from its source; there is nothing to write.
+    let first = if project.kind == ProjectKind::Clip {
+        first.max(Stage::Assets)
+    } else {
+        first
     };
     validate_start(&project, first)?;
     let stages: Vec<Stage> = if only {
@@ -85,6 +98,19 @@ pub async fn start(
 }
 
 fn validate_start(p: &Project, first: Stage) -> anyhow::Result<()> {
+    if p.kind == ProjectKind::Clip {
+        anyhow::ensure!(
+            p.clip.is_some() && p.beats.len() == 1,
+            "this clip has lost its source moment; make it again from the video"
+        );
+        if first >= Stage::Voice {
+            anyhow::ensure!(p.beats[0].asset.is_some(), "download the clip first");
+        }
+        if first == Stage::Render {
+            anyhow::ensure!(p.voice_track.is_some(), "extract the clip's audio first");
+        }
+        return Ok(());
+    }
     match first {
         Stage::Research => {}
         Stage::Hooks => anyhow::ensure!(p.research.is_some(), "research the topic first"),
@@ -178,6 +204,12 @@ pub fn first_unfinished(p: &Project) -> Option<Stage> {
 /// Invalidate outputs that depend on this stage. Asset swaps do not invalidate
 /// narration, and a visuals rerun preserves user-locked assets.
 pub fn reset_from(p: &mut Project, stage: Stage) {
+    // A clip's script and single beat are its source; never clear them.
+    let stage = if p.kind == ProjectKind::Clip {
+        stage.max(Stage::Assets)
+    } else {
+        stage
+    };
     if stage <= Stage::Research {
         p.research = None;
     }
@@ -261,10 +293,13 @@ async fn run_stages(state: &AppState, id: &str, stages: &[Stage]) -> anyhow::Res
         progress.fraction(1.0, format!("{} done", stage.label()));
 
         let more = i + 1 < stages.len();
-        if more
-            && !project.autopilot
-            && matches!(stage, Stage::Hooks | Stage::Script | Stage::Assets)
-        {
+        // A clip's only visual is its own footage; there is nothing to review.
+        let review = match stage {
+            Stage::Hooks | Stage::Script => true,
+            Stage::Assets => project.kind != ProjectKind::Clip,
+            _ => false,
+        };
+        if more && !project.autopilot && review {
             progress.info(format!("Paused after {} for review", stage.label()));
             break;
         }
@@ -379,6 +414,12 @@ async fn run_stage(
                 })
                 .await?;
         }
+        Stage::Assets if project.kind == ProjectKind::Clip => {
+            crate::clips::download(state, &svc, &project, &dir, progress).await?
+        }
+        Stage::Voice if project.kind == ProjectKind::Clip => {
+            crate::clips::extract_voice(state, &svc, &project, &dir, progress).await?
+        }
         Stage::Assets => assets_stage(state, &svc, &project, &dir, progress).await?,
         Stage::Voice => {
             let script = project.script.clone().context("write the script first")?;
@@ -412,18 +453,81 @@ async fn run_stage(
             }
             let render_dir = ProjectPaths(&dir).render();
             tokio::fs::create_dir_all(&render_dir).await?;
+            let formats = project.formats();
+            for stale in [render_dir.join("thumb.jpg")].into_iter().chain(
+                Format::ALL
+                    .iter()
+                    .map(|f| render_dir.join(variant_file(*f))),
+            ) {
+                let _ = std::fs::remove_file(stale);
+            }
+            // Each format gets an equal share of the progress bar.
+            let share = 1.0 / formats.len() as f32;
             let timeline = build_timeline(&svc, &project, &dir).await?;
             write_json(&render_dir.join("timeline.json"), &timeline)?;
             let out = render_dir.join("final.mp4");
-            svc.renderer.render(&timeline, &out, progress).await?;
+            svc.renderer
+                .render(&timeline, &out, &progress.span(0.0, share))
+                .await?;
             std::fs::write(render_dir.join("credits.txt"), credits(&project))?;
-            let thumb_at = (timeline.duration_s * 0.1).clamp(0.0, 1.2);
-            if let Err(e) = svc
+            let subtitles = write_subtitles(&project, &render_dir).unwrap_or_else(|e| {
+                progress.warn(format!("Caption files failed: {e:#}"));
+                None
+            });
+            let thumbnail_jpg = match svc
                 .renderer
-                .still(&timeline, thumb_at, &render_dir.join("thumb.png"))
+                .thumbnail(
+                    &project,
+                    &dir,
+                    &timeline,
+                    &render_dir.join("thumb.png"),
+                    &render_dir.join("thumb.jpg"),
+                )
                 .await
             {
-                progress.warn(format!("Thumbnail failed: {e:#}"));
+                Ok(()) => Some("render/thumb.jpg".to_string()),
+                Err(e) => {
+                    progress.warn(format!("Designed thumbnail failed, using a frame: {e:#}"));
+                    let thumb_at = (timeline.duration_s * 0.1).clamp(0.0, 1.2);
+                    if let Err(e) = svc
+                        .renderer
+                        .still(&timeline, thumb_at, &render_dir.join("thumb.png"))
+                        .await
+                    {
+                        progress.warn(format!("Thumbnail failed: {e:#}"));
+                    }
+                    None
+                }
+            };
+            // The same edit in the other aspect ratios. A failed variant
+            // keeps the main video.
+            let mut variants = Vec::new();
+            for (i, &format) in formats.iter().enumerate().skip(1) {
+                progress.info(format!("Rendering the {} version", format.ratio()));
+                let mut alt = project.clone();
+                alt.format = format;
+                let file = variant_file(format);
+                let result = async {
+                    let timeline = build_timeline(&svc, &alt, &dir).await?;
+                    let span = progress.span(i as f32 * share, share);
+                    svc.renderer
+                        .render(&timeline, &render_dir.join(&file), &span)
+                        .await?;
+                    anyhow::Ok((timeline.width, timeline.height))
+                }
+                .await;
+                match result {
+                    Ok((width, height)) => variants.push(RenderVariant {
+                        format,
+                        path: format!("render/{file}"),
+                        width,
+                        height,
+                    }),
+                    Err(e) => progress.warn(format!(
+                        "The {} version failed: {e:#}",
+                        format.ratio()
+                    )),
+                }
             }
             let output = RenderOutput {
                 path: "render/final.mp4".into(),
@@ -432,6 +536,9 @@ async fn run_stage(
                 width: timeline.width,
                 height: timeline.height,
                 rendered_at: Utc::now(),
+                variants,
+                subtitles,
+                thumbnail_jpg,
             };
             state
                 .store
@@ -1079,7 +1186,7 @@ fn pick_music(folder: &Path, seed: &str) -> Option<PathBuf> {
 
 fn credits(project: &Project) -> String {
     let mut out = format!(
-        "{}\n\nVisuals\n",
+        "{}\n\n",
         project
             .script
             .as_ref()
@@ -1087,6 +1194,17 @@ fn credits(project: &Project) -> String {
             .filter(|t| !t.is_empty())
             .unwrap_or(&project.topic)
     );
+    if let Some(c) = &project.clip {
+        out.push_str(&format!(
+            "Clip source\n- {} — {} {} ({}–{})\n\n",
+            c.title,
+            c.channel,
+            c.url,
+            crate::clips::clock(c.start_s),
+            crate::clips::clock(c.end_s)
+        ));
+    }
+    out.push_str("Visuals\n");
     for b in &project.beats {
         if let Some(a) = &b.asset {
             let credit = if a.credit.is_empty() {
@@ -1114,6 +1232,30 @@ fn credits(project: &Project) -> String {
 
 fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
     clipcut_core::write_atomic(path, serde_json::to_string_pretty(value)?.as_bytes())
+}
+
+/// File name of a format's extra render, next to `final.mp4`.
+fn variant_file(format: Format) -> String {
+    format!("final-{}.mp4", format.slug())
+}
+
+/// `render/captions.srt` and `.vtt` from the voice track's word timings.
+fn write_subtitles(project: &Project, render_dir: &Path) -> anyhow::Result<Option<Subtitles>> {
+    let Some(track) = &project.voice_track else {
+        return Ok(None);
+    };
+    let cues = subtitles::cues_from_words(&track.words);
+    if cues.is_empty() {
+        return Ok(None);
+    }
+    let srt = render_dir.join("captions.srt");
+    let vtt = render_dir.join("captions.vtt");
+    clipcut_core::write_atomic(&srt, subtitles::to_srt(&cues).as_bytes())?;
+    clipcut_core::write_atomic(&vtt, subtitles::to_vtt(&cues).as_bytes())?;
+    Ok(Some(Subtitles {
+        srt: "render/captions.srt".into(),
+        vtt: "render/captions.vtt".into(),
+    }))
 }
 
 /// Classify a user upload by extension and probe its size.

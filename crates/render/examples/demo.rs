@@ -485,6 +485,11 @@ fn project(dir: &Path, format: Format) -> Project {
         beats: out_beats,
         voice_track: Some(voice),
         render: None,
+        caption_preset: None,
+        extra_formats: vec![],
+        published: vec![],
+        kind: Default::default(),
+        clip: None,
     }
 }
 

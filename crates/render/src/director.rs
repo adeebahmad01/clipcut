@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use clipcut_core::Config;
-use clipcut_core::model::{AssetKind, Beat, Project, VisualKind, WordTiming};
+use clipcut_core::model::{AssetKind, Beat, Project, ProjectKind, VisualKind, WordTiming};
 use clipcut_core::timeline::{
     Align, Anim, AnimKind, AudioPlan, CaptionStyle, CaptionWord, CardStyle, Fit, FontKind, Layer,
     LayerContent, Motion, MusicBed, Pan, RectF, Rgba, SfxCue, SfxKind, TextStyle, Timeline,
@@ -170,33 +170,46 @@ struct Geo {
     w: f32,
     h: f32,
     vertical: bool,
+    square: bool,
 }
 
 impl Geo {
     fn region(&self) -> RectF {
-        if self.vertical {
+        if self.square {
+            RectF::new(0.1, 0.25, 0.8, 0.46)
+        } else if self.vertical {
             RectF::new(0.05, 0.25, 0.9, 0.37)
         } else {
             RectF::new(0.04, 0.1, 0.56, 0.7)
         }
     }
     fn text_rect(&self, hook: bool) -> RectF {
-        match (self.vertical, hook) {
-            (true, false) => RectF::new(0.06, 0.105, 0.88, 0.135),
-            (true, true) => RectF::new(0.05, 0.09, 0.9, 0.155),
-            (false, _) => RectF::new(0.62, 0.2, 0.35, 0.45),
+        match (self.square, self.vertical, hook) {
+            (true, _, false) => RectF::new(0.06, 0.05, 0.88, 0.16),
+            (true, _, true) => RectF::new(0.05, 0.04, 0.9, 0.19),
+            (false, true, false) => RectF::new(0.06, 0.105, 0.88, 0.135),
+            (false, true, true) => RectF::new(0.05, 0.09, 0.9, 0.155),
+            (false, false, _) => RectF::new(0.62, 0.2, 0.35, 0.45),
         }
     }
     fn text_size(&self, hook: bool) -> f32 {
-        match (self.vertical, hook) {
-            (true, false) => 118.0,
-            (true, true) => 148.0,
-            (false, false) => 104.0,
-            (false, true) => 124.0,
+        match (self.square, self.vertical, hook) {
+            (true, _, false) => 92.0,
+            (true, _, true) => 112.0,
+            (false, true, false) => 118.0,
+            (false, true, true) => 148.0,
+            (false, false, false) => 104.0,
+            (false, false, true) => 124.0,
         }
     }
     fn caption_y(&self) -> f32 {
-        if self.vertical { 0.72 } else { 0.875 }
+        if self.square {
+            0.83
+        } else if self.vertical {
+            0.72
+        } else {
+            0.875
+        }
     }
     /// Card rect fitting `aspect` inside `region` (cover-cropped below `min_frac` width).
     fn card_rect(&self, aspect: f32, region: RectF, min_frac: f32) -> RectF {
@@ -1104,7 +1117,8 @@ impl Director<'_> {
         }
         lines.truncate(4);
         let icon = b.icon.clone();
-        let vertical = self.geo.vertical;
+        // Square frames have the room of a landscape one for stacked words.
+        let vertical = self.geo.vertical && !self.geo.square;
         let (size, line_step, side) = if vertical {
             (176.0, 0.1, 0.3)
         } else {
@@ -1203,6 +1217,121 @@ impl Director<'_> {
     }
 }
 
+/// Where a clip's source sits: (top, height) of a full-width band, or `None`
+/// for full-bleed. Wide sources in a vertical frame are cropped toward 1:1.
+fn clip_band(geo: &Geo, source_aspect: f32) -> Option<(f32, f32)> {
+    let frame = geo.w / geo.h;
+    let band_aspect = source_aspect.clamp(frame, frame.max(1.0));
+    let band_h = frame / band_aspect;
+    (band_h < 0.92).then(|| (((1.0 - band_h) * 0.42).max(0.0), band_h))
+}
+
+/// Punch-in cuts for a clip: on sentence starts at least 4 s apart (any word
+/// after 7 s without one), never in the last 2.5 s.
+fn clip_cuts(s: f32, e: f32, sentences: &[WordTiming], words: &[WordTiming]) -> Vec<(f32, f32)> {
+    let mut cuts = vec![s];
+    if words.is_empty() {
+        let n = ((e - s) / 6.0).floor() as usize;
+        cuts.extend((1..n).map(|k| s + (e - s) * k as f32 / n as f32));
+    }
+    for w in words {
+        let (t, last) = (w.start_s, *cuts.last().unwrap());
+        if t <= last || t > e - 2.5 {
+            continue;
+        }
+        let sentence = sentences.iter().any(|x| (x.start_s - t).abs() < 0.05);
+        if (sentence && t - last >= 4.0) || t - last >= 7.0 {
+            cuts.push(t);
+        }
+    }
+    cuts.push(e);
+    cuts.windows(2).map(|p| (p[0], p[1])).collect()
+}
+
+impl Director<'_> {
+    /// Clip-from-long-video edit: the source moment plays straight through
+    /// (its own audio is the voice track) as a band over a blurred copy of
+    /// itself, punching in on sentence starts, with the hook on top. Returns
+    /// the caption center line.
+    fn clip(&mut self, b: &BeatCtx, hook: Option<String>, sentences: &[WordTiming]) -> f32 {
+        let Some(m) = b.media.clone().filter(|m| m.video) else {
+            let pieces =
+                split_pieces(b.s, b.e, self.min_clip, self.max_clip, self.words, &mut self.rng);
+            self.kinetic(b, &pieces, hook);
+            return self.geo.caption_y();
+        };
+        let band = clip_band(&self.geo, m.aspect());
+        let rect = band.map_or(RectF::FULL, |(top, h)| RectF::new(0.0, top, 1.0, h));
+        if band.is_some() {
+            self.backdrop(&m, b.s, b.e);
+            let mut dim = Layer::new(
+                b.s,
+                b.e,
+                1,
+                LayerContent::Solid {
+                    color: Rgba(0, 0, 0, 255),
+                },
+                RectF::FULL,
+            );
+            dim.opacity = 0.35;
+            self.layers.push(dim);
+        } else {
+            self.full_bleed_overlays(b.s, b.e);
+        }
+        for (j, (ps, pe)) in clip_cuts(b.s, b.e, sentences, self.words)
+            .into_iter()
+            .enumerate()
+        {
+            let content = LayerContent::Video {
+                path: m.path.clone(),
+                trim_start_s: m.trim + (ps - b.s),
+                looped: false,
+            };
+            let mut l = Layer::new(ps, pe, if band.is_some() { 10 } else { 0 }, content, rect);
+            if j % 2 == 1 {
+                l.crop = Some(punch_crop(m.focus, self.rng.range(1.15, 1.22)));
+                let k = if self.rng.chance(0.5) {
+                    SfxKind::Whoosh
+                } else {
+                    SfxKind::Swoosh
+                };
+                self.cue(k, ps, 0.45);
+            } else {
+                l.motion = Motion::PushIn { amount: 0.03 };
+                if j > 0 {
+                    self.cue(SfxKind::Click, ps, 0.4);
+                }
+            }
+            self.layers.push(l);
+        }
+        if let Some(text) = hook.filter(|t| !t.trim().is_empty()) {
+            let text = truncate_words(&text, 8);
+            let (tr, end) = match band {
+                // A header above the band for the whole clip.
+                Some((top, _)) => (
+                    RectF::new(0.05, 0.03, 0.9, (top - 0.045).max(0.07)),
+                    b.e,
+                ),
+                None => (self.geo.text_rect(true), (b.s + 3.5).min(b.e)),
+            };
+            let key = key_word(&text);
+            let style = self.text_style(self.geo.text_size(true), key.as_deref(), false);
+            let mut l = Layer::new(b.s + 0.05, end, 20, LayerContent::Text { text, style }, tr);
+            l.enter = Anim::new(AnimKind::Pop, 0.32);
+            if band.is_none() {
+                l.exit = Anim::new(AnimKind::Fade, 0.25);
+            }
+            self.layers.push(l);
+            self.cue(SfxKind::Pop, b.s + 0.05, 0.6);
+        }
+        match band {
+            Some((top, h)) if 1.0 - (top + h) >= 0.13 => top + h + 0.075,
+            Some((top, h)) => top + h - 0.09,
+            None => self.geo.caption_y(),
+        }
+    }
+}
+
 /// Build the timeline for a project.
 pub fn direct(
     config: &Config,
@@ -1213,10 +1342,12 @@ pub fn direct(
     project_dir: &Path,
 ) -> anyhow::Result<Timeline> {
     let (w, h) = project.format.size();
+    // Square posts share the vertical layout with their own text and card bands.
     let geo = Geo {
         w: w as f32,
         h: h as f32,
-        vertical: h > w,
+        vertical: h >= w,
+        square: h == w,
     };
     let mut rng = Rng::from_str(&project.id);
     let (accent, second) = *rng.pick(&PALETTES);
@@ -1292,6 +1423,8 @@ pub fn direct(
         gradient_idx: 0,
     };
     d.gradient_idx = d.rng.below(GRADIENTS.len());
+    let clip = project.kind == ProjectKind::Clip && !beats.is_empty();
+    let mut caption_y = d.geo.caption_y();
 
     if beats.is_empty() {
         for (i, (s, e)) in split_pieces(0.0, duration, d.min_clip, d.max_clip, words, &mut d.rng)
@@ -1333,17 +1466,31 @@ pub fn direct(
             .cloned()
             .or(svg_asset)
             .filter(|p| p.is_file());
-        d.beat(BeatCtx {
+        let ctx = BeatCtx {
             beat: b,
             s,
             e,
             hook: i == 0,
             media,
             icon,
-        });
+        };
+        if clip {
+            // One beat per clip; a stray extra beat is not drawn.
+            if i == 0 {
+                let hook = project
+                    .clip
+                    .as_ref()
+                    .map(|c| c.hook.clone())
+                    .or_else(|| b.visual.on_screen_text.clone());
+                let sentences = voice.map(|v| v.sentences.as_slice()).unwrap_or_default();
+                caption_y = d.clip(&BeatCtx { e: duration, ..ctx }, hook, sentences);
+            }
+            continue;
+        }
+        d.beat(ctx);
     }
     // Riser into the first cut.
-    if spans.len() >= 2 && spans[0].1 - spans[0].0 >= 1.4 {
+    if !clip && spans.len() >= 2 && spans[0].1 - spans[0].0 >= 1.4 {
         d.cue(SfxKind::Riser, spans[0].1, 1.0);
     }
 
@@ -1367,17 +1514,20 @@ pub fn direct(
             }
         })
         .collect();
+    let preset = project.caption_preset.unwrap_or(config.video.caption_preset);
+    let (font, scale, max_words, uppercase) = preset.shape();
     let caption_style = CaptionStyle {
         enabled: config.video.captions,
-        font: FontKind::Heavy,
-        size_px: if geo_vertical(w, h) { 80.0 } else { 64.0 },
+        font,
+        size_px: (if geo_vertical(w, h) { 80.0 } else { 64.0 }) * scale,
         color: Rgba::WHITE,
         accent: d.accent,
         stroke: Rgba(0, 0, 0, 255),
-        y: d.geo.caption_y(),
-        max_words: 3,
-        uppercase: true,
+        y: caption_y,
+        max_words,
+        uppercase,
         emphasis_color: Some(d.second),
+        preset,
     };
 
     let voice_path = voice.map(|v| {
@@ -1391,8 +1541,9 @@ pub fn direct(
     let voice_path = voice_path
         .filter(|p| p.is_file())
         .map(|p| p.to_string_lossy().to_string());
+    // A clip keeps its own soundtrack; a music bed would fight it.
     let music = music
-        .filter(|_| config.audio.use_music)
+        .filter(|_| config.audio.use_music && !clip)
         .filter(|p| p.is_file())
         .map(|p| MusicBed {
             path: p.to_string_lossy().to_string(),
@@ -1434,6 +1585,49 @@ mod tests {
         assert_eq!(clip_bounds(0.1, 9.0), (1.0, 3.0));
         assert_eq!(clip_bounds(4.0, 2.0), (2.0, 2.0));
         assert_eq!(clip_bounds(f32::NAN, f32::INFINITY), (1.0, 3.0));
+    }
+
+    fn geo(w: f32, h: f32) -> Geo {
+        Geo {
+            w,
+            h,
+            vertical: h >= w,
+            square: h == w,
+        }
+    }
+
+    #[test]
+    fn clip_band_crops_wide_sources_toward_square_in_vertical_frames() {
+        let (top, h) = clip_band(&geo(1080.0, 1920.0), 16.0 / 9.0).unwrap();
+        assert!((h - 0.5625).abs() < 1e-4 && top > 0.15 && top + h < 0.8, "{top} {h}");
+        // Portrait sources and matching frames fill the screen.
+        assert!(clip_band(&geo(1080.0, 1920.0), 9.0 / 16.0).is_none());
+        assert!(clip_band(&geo(1920.0, 1080.0), 16.0 / 9.0).is_none());
+        assert!(clip_band(&geo(1080.0, 1080.0), 16.0 / 9.0).is_none());
+    }
+
+    #[test]
+    fn clip_cuts_land_on_sentences_and_cover_the_clip() {
+        let wt = |t: f32| WordTiming {
+            text: "w".into(),
+            start_s: t,
+            end_s: t + 0.2,
+        };
+        let words: Vec<_> = (0..150).map(|i| wt(i as f32 * 0.3)).collect();
+        let sentences = vec![wt(0.0), wt(3.0), wt(5.1), wt(15.0), wt(42.0)];
+        let cuts = clip_cuts(0.0, 45.0, &sentences, &words);
+        assert_eq!(cuts.first().unwrap().0, 0.0);
+        assert_eq!(cuts.last().unwrap().1, 45.0);
+        assert!((cuts[1].0 - 5.1).abs() < 0.01, "{cuts:?}");
+        for (i, &(s, e)) in cuts.iter().enumerate() {
+            assert!(e > s && e - s <= 7.31, "{cuts:?}");
+            if i > 0 {
+                assert_eq!(cuts[i - 1].1, s);
+            }
+        }
+        assert!(cuts.iter().all(|c| c.0 <= 42.5), "no cut in the last 2.5 s: {cuts:?}");
+        let even = clip_cuts(0.0, 30.0, &[], &[]);
+        assert_eq!(even.len(), 5);
     }
 
     #[test]
