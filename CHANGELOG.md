@@ -18,6 +18,10 @@ follow [Semantic Versioning](https://semver.org/).
   shorts (`clipcut clip <url>`).
 - Caption styles: Pop, Hormozi, MrBeast, Minimal and Karaoke.
 - 1:1 square format, and exporting the other formats from the same edit.
+- YouTube upload defaults under Settings → Preferences (`[publish]` in
+  `config.toml`): the default privacy, the category and "made for kids".
+  Uploads now use them; publishing without a privacy is private unless you
+  change the default.
 - `.srt` and `.vtt` caption files and a 1280×720 thumbnail with every
   render.
 - Docs for all of the above in Usage, Configuration, API, Architecture and
