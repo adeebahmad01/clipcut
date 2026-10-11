@@ -119,9 +119,9 @@ enum Command {
     /// Upload a rendered project to YouTube; `--connect` signs in first.
     Publish {
         id: Option<String>,
-        /// public, unlisted or private.
-        #[arg(long, default_value = "public")]
-        privacy: String,
+        /// public, unlisted or private; default: `privacy` under [publish] in config.toml.
+        #[arg(long)]
+        privacy: Option<String>,
         /// Release time; the video stays private until then.
         #[arg(long, value_parser = cli::parse_time)]
         at: Option<DateTime<Utc>>,

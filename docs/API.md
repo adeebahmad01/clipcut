@@ -146,7 +146,9 @@ secret and tokens are never returned.
 `{ configured, connected, client_id, channel, channel_id, connected_at, connecting }`.
 
 `publish` uploads the render of `format` (default: the main format).
-`privacy` is `public` (default), `unlisted` or `private`. `publish_at`
+`privacy` is `public`, `unlisted` or `private`; left out, it is
+`privacy` under `[publish]` in the config (`private` unless changed).
+Every upload gets that section's `category_id` and `made_for_kids`. `publish_at`
 (RFC 3339, at most 730 days ahead) schedules the release: the video uploads
 as private and goes public then, even if `privacy` is `unlisted`. A
 `private` upload ignores `publish_at`. The request returns when the upload is
@@ -176,7 +178,8 @@ saved in `<home>/queue.json`.
 `{ topics?: [string], items?: [{ topic, notes?, ...options }], ...options, publish_every_minutes? }`,
 where `options` are `{ format?, target_seconds?, voice?, caption_preset?, extra_formats?, publish?: { privacy?, publish_at? } }`.
 Top-level options apply to `topics`. Blank topics are skipped; at most 200
-per request. With `publish_every_minutes` (≤ 43200), item N is released N ×
+per request. A `publish` without `privacy` uses the configured default, as
+in [Publishing](#publishing). With `publish_every_minutes` (≤ 43200), item N is released N ×
 that interval after the first. Asking to publish while YouTube isn't
 connected is a 400.
 
