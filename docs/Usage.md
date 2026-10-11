@@ -221,7 +221,10 @@ Once connected, the **Ready to post** kit has a **Publish to YouTube**
 section. It uses the kit's title, description and hashtags, and adds a
 credits list of every source to the description.
 
-- **Privacy:** Public, Unlisted or Private.
+- **Privacy:** Public, Unlisted or Private. It starts at the default from
+  **Settings → Preferences → YouTube uploads** (Private unless you change
+  it), which also sets the category and the "made for kids" flag for every
+  upload. See [`[publish]`](Configuration.md#publish).
 - **Release time:** leave it empty to publish now, or pick a time to
   schedule. Scheduled videos upload as private and go public at that time.
   YouTube can't schedule unlisted videos, so an unlisted video with a
@@ -285,7 +288,7 @@ one-time setup):
 
 ```bash
 clipcut publish --client client_secret.json --connect   # save the OAuth client and sign in
-clipcut publish <project-id>                             # upload now, public
+clipcut publish <project-id>                             # upload now, with the default privacy
 clipcut publish <project-id> --privacy unlisted --format square
 clipcut publish <project-id> --at "2026-10-12 15:00"     # schedule (local time or RFC 3339)
 clipcut publish --disconnect                             # sign out

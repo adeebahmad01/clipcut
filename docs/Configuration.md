@@ -70,6 +70,11 @@ music_volume = 0.14
 duck_music = true
 use_music = true
 
+[publish]
+privacy = "private"
+category_id = "22"
+made_for_kids = false
+
 [tools]
 # ffmpeg = "/opt/ffmpeg/bin/ffmpeg"
 ```
@@ -166,6 +171,17 @@ and slightly rougher). Run `clipcut setup kokoro` after changing it.
 
 See [Sound effects and music](Usage.md#sound-effects-and-music) for the
 `sfx/` and `music/` folders.
+
+## publish
+
+Defaults for [publishing to YouTube](Usage.md#publish-to-youtube). Change
+them in **Settings → Preferences → YouTube uploads**.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `privacy` | `"private"` | Privacy preselected in the app, and used by `clipcut publish` without `--privacy` and by API requests that leave `privacy` out: `public`, `unlisted` or `private` |
+| `category_id` | `"22"` | YouTube category of every upload, as its numeric id: `22` People & Blogs, `24` Entertainment, `27` Education, `28` Science & Technology. The app lists them all |
+| `made_for_kids` | `false` | Declare uploads as made for kids. YouTube then turns off comments and personalized ads on them |
 
 ## tools
 

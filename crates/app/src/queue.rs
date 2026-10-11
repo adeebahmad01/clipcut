@@ -39,16 +39,22 @@ pub enum ItemStatus {
 /// Publish a queued video once it renders.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublishPlan {
-    /// public, unlisted or private.
-    #[serde(default = "default_privacy")]
+    /// public, unlisted or private. Left out of a request, it is filled in
+    /// from `[publish].privacy` with [`PublishPlan::default_privacy`].
+    #[serde(default)]
     pub privacy: String,
     /// Release time. While in the future the upload stays private until then.
     #[serde(default)]
     pub publish_at: Option<DateTime<Utc>>,
 }
 
-fn default_privacy() -> String {
-    "public".into()
+impl PublishPlan {
+    /// Use `privacy` (the configured default) when none was given.
+    pub fn default_privacy(&mut self, privacy: &str) {
+        if self.privacy.trim().is_empty() {
+            self.privacy = privacy.to_string();
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -112,6 +118,21 @@ pub struct AddBody {
     /// after the first (which publishes at `publish.publish_at`, or on render).
     #[serde(default)]
     pub publish_every_minutes: Option<u32>,
+}
+
+impl AddBody {
+    /// Fill every publish plan that has no privacy with `privacy`.
+    pub fn default_privacy(&mut self, privacy: &str) {
+        let plans = self
+            .items
+            .iter_mut()
+            .map(|i| &mut i.options)
+            .chain([&mut self.options])
+            .filter_map(|o| o.publish.as_mut());
+        for plan in plans {
+            plan.default_privacy(privacy);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -683,5 +704,27 @@ mod tests {
         });
         assert!(validate(&b).is_err());
         assert!(validate(&AddBody::default()).is_err());
+    }
+
+    #[test]
+    fn omitted_privacy_takes_the_configured_default() {
+        let mut b: AddBody = serde_json::from_value(serde_json::json!({
+            "topics": ["a"],
+            "publish": {},
+            "items": [
+                { "topic": "b", "publish": { "privacy": "public" } },
+                { "topic": "c", "publish": { "publish_at": null } },
+                { "topic": "d" },
+            ],
+        }))
+        .unwrap();
+        assert!(validate(&b).is_err(), "an unfilled privacy is rejected");
+        b.default_privacy("unlisted");
+        assert!(validate(&b).is_ok());
+        let privacy = |o: &ItemOptions| o.publish.as_ref().map(|p| p.privacy.clone());
+        assert_eq!(privacy(&b.options).as_deref(), Some("unlisted"));
+        assert_eq!(privacy(&b.items[0].options).as_deref(), Some("public"));
+        assert_eq!(privacy(&b.items[1].options).as_deref(), Some("unlisted"));
+        assert_eq!(privacy(&b.items[2].options), None, "no plan stays no plan");
     }
 }

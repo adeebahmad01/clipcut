@@ -1537,8 +1537,9 @@ struct PublishBody {
 async fn publish_project(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(body): Json<PublishBody>,
+    Json(mut body): Json<PublishBody>,
 ) -> ApiResult<Json<PublishRecord>> {
+    body.plan.default_privacy(&state.config().publish.privacy);
     queue::validate_plan(&body.plan).map_err(ApiError::bad_request)?;
     let project = project_or_404(&state, &id)?;
     if state.store.is_running(&id) {
@@ -1661,8 +1662,9 @@ fn wants_publish(body: &AddBody) -> bool {
 
 async fn add_queue(
     State(state): State<AppState>,
-    Json(body): Json<AddBody>,
+    Json(mut body): Json<AddBody>,
 ) -> ApiResult<Json<Vec<QueueItem>>> {
+    body.default_privacy(&state.config().publish.privacy);
     queue::validate(&body).map_err(ApiError::bad_request)?;
     if wants_publish(&body) {
         ensure_youtube_connected(&state)?;
@@ -1805,6 +1807,9 @@ async fn create_clips(
     State(state): State<AppState>,
     Json(mut body): Json<ClipBody>,
 ) -> ApiResult<Json<Vec<Project>>> {
+    if let Some(plan) = &mut body.publish {
+        plan.default_privacy(&state.config().publish.privacy);
+    }
     validate_clip_body(&body).map_err(ApiError::bad_request)?;
     if body.publish.is_some() {
         ensure_youtube_connected(&state)?;
@@ -2348,6 +2353,35 @@ mod tests {
         let response = call(&state, "POST", "/api/queue/clear", json!({})).await;
         assert_eq!(response_json(response).await["removed"], 0, "waiting items stay");
         assert_eq!(state.queue.snapshot().items.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn queued_publishing_defaults_to_the_configured_privacy() {
+        let home = TestHome::new();
+        let state = home.state();
+        state.publish.sign_in_for_test();
+        let mut config = state.config();
+        config.publish.privacy = "unlisted".into();
+        state.set_config(config).unwrap();
+        state.queue.set_paused(true).unwrap();
+
+        let response = call(
+            &state,
+            "POST",
+            "/api/queue",
+            json!({
+                "topics": ["Default"],
+                "publish": {},
+                "items": [{"topic": "Chosen", "publish": {"privacy": "public"}}],
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let added = response_json(response).await;
+        assert_eq!(added[0]["topic"], "Chosen");
+        assert_eq!(added[0]["publish"]["privacy"], "public");
+        assert_eq!(added[1]["topic"], "Default");
+        assert_eq!(added[1]["publish"]["privacy"], "unlisted");
     }
 
     #[tokio::test]
