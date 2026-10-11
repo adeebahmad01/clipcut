@@ -346,7 +346,7 @@ async fn drain(state: &AppState, ours: &[QueueItem]) -> anyhow::Result<()> {
 
 pub struct PublishArgs {
     pub id: Option<String>,
-    pub privacy: String,
+    pub privacy: Option<String>,
     pub at: Option<DateTime<Utc>>,
     pub format: Option<Format>,
     pub connect: bool,
@@ -373,8 +373,11 @@ pub async fn publish(state: AppState, args: PublishArgs) -> anyhow::Result<()> {
         }
         anyhow::bail!("give a project id, or --connect to sign in to YouTube");
     };
+    let privacy = args
+        .privacy
+        .unwrap_or_else(|| state.config().publish.privacy);
     let plan = PublishPlan {
-        privacy: args.privacy.to_ascii_lowercase(),
+        privacy: privacy.to_ascii_lowercase(),
         publish_at: args.at,
     };
     queue::validate_plan(&plan).map_err(anyhow::Error::msg)?;

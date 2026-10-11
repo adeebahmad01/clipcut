@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use base64::Engine;
 use chrono::{DateTime, SecondsFormat, Utc};
-use clipcut_core::config::Format;
+use clipcut_core::config::{Format, PublishConfig};
 use clipcut_core::model::write_private;
 use clipcut_core::{Progress, Project, PublishRecord};
 use reqwest::StatusCode;
@@ -751,6 +751,7 @@ struct Meta {
 
 fn metadata(
     project: &Project,
+    defaults: &PublishConfig,
     privacy: &str,
     publish_at: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
@@ -819,7 +820,10 @@ fn metadata(
         }
         None => (privacy, privacy, None),
     };
-    let mut status = json!({ "privacyStatus": requested, "selfDeclaredMadeForKids": false });
+    let mut status = json!({
+        "privacyStatus": requested,
+        "selfDeclaredMadeForKids": defaults.made_for_kids,
+    });
     if let Some(at) = publish_at {
         status["publishAt"] = json!(at.to_rfc3339_opts(SecondsFormat::Secs, true));
     }
@@ -828,8 +832,7 @@ fn metadata(
             "title": title,
             "description": description,
             "tags": tags,
-            // People & Blogs, YouTube's default.
-            "categoryId": "22",
+            "categoryId": defaults.category_id,
         },
         "status": status,
     });
@@ -949,7 +952,8 @@ pub async fn upload(
     anyhow::ensure!(total > 0, "{} is empty; render again", path.display());
     let is_short = format != Format::Horizontal && render.duration_s <= SHORTS_MAX_S;
 
-    let meta = metadata(&project, privacy, publish_at, Utc::now());
+    let defaults = state.config().publish;
+    let meta = metadata(&project, &defaults, privacy, publish_at, Utc::now());
     for warning in &meta.warnings {
         progress.warn(warning.clone());
     }
@@ -1323,6 +1327,10 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
+        let mut config = state.config();
+        config.publish.category_id = "27".into();
+        config.publish.made_for_kids = true;
+        state.set_config(config).unwrap();
         let mut project = finished_project();
         project.script.as_mut().unwrap().hashtags =
             vec!["#shorts".into(), "#Fixture".into(), "fixture".into()];
@@ -1349,6 +1357,8 @@ mod tests {
             assert_eq!(meta["snippet"]["tags"], json!(["shorts", "Fixture"]));
             assert_eq!(meta["status"]["privacyStatus"], "unlisted");
             assert!(meta["status"].get("publishAt").is_none());
+            assert_eq!(meta["snippet"]["categoryId"], "27", "from [publish]");
+            assert_eq!(meta["status"]["selfDeclaredMadeForKids"], true);
         }
         let saved = state.store.get(&project.id).unwrap();
         assert_eq!(saved.published.len(), 1);
@@ -1442,9 +1452,12 @@ mod tests {
         project.script.as_mut().unwrap().title = "A <b>title</b>".into();
         let now = Utc::now();
         let later = now + chrono::Duration::hours(3);
+        let defaults = PublishConfig::default();
 
-        let meta = metadata(&project, "unlisted", Some(later), now);
+        let meta = metadata(&project, &defaults, "unlisted", Some(later), now);
         assert_eq!(meta.body["snippet"]["title"], "A btitle/b");
+        assert_eq!(meta.body["snippet"]["categoryId"], "22");
+        assert_eq!(meta.body["status"]["selfDeclaredMadeForKids"], false);
         assert_eq!(meta.body["status"]["privacyStatus"], "private");
         assert_eq!(
             meta.body["status"]["publishAt"],
@@ -1454,11 +1467,12 @@ mod tests {
         assert_eq!(meta.publish_at, Some(later));
         assert_eq!(meta.warnings.len(), 1);
 
-        let past = metadata(&project, "public", Some(now - chrono::Duration::hours(1)), now);
+        let hour_ago = now - chrono::Duration::hours(1);
+        let past = metadata(&project, &defaults, "public", Some(hour_ago), now);
         assert_eq!(past.body["status"]["privacyStatus"], "public");
         assert!(past.publish_at.is_none() && past.body["status"].get("publishAt").is_none());
 
-        let private = metadata(&project, "private", Some(later), now);
+        let private = metadata(&project, &defaults, "private", Some(later), now);
         assert_eq!(private.body["status"]["privacyStatus"], "private");
         assert!(private.publish_at.is_none());
     }
@@ -1475,7 +1489,8 @@ mod tests {
     fn descriptions_stay_within_youtube_limits() {
         let mut project = finished_project();
         project.script.as_mut().unwrap().description = "é".repeat(4000);
-        let meta = metadata(&project, "public", None, Utc::now());
+        let defaults = PublishConfig::default();
+        let meta = metadata(&project, &defaults, "public", None, Utc::now());
         let description = meta.body["snippet"]["description"].as_str().unwrap();
         assert!(description.len() <= 5000);
     }

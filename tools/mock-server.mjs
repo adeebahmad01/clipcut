@@ -460,6 +460,7 @@ let config = {
   youtube: { max_results: 8, max_video_minutes: 40, cookies_from_browser: null, channel_blocklist: [] },
   tts: { engine: 'kokoro', voice: 'am_michael', speed: 1.1, command: '' },
   audio: { voice_volume: 1, sfx_volume: 0.55, music_volume: 0.14, duck_music: true, use_music: true },
+  publish: { privacy: 'private', category_id: '22', made_for_kids: false },
   tools: {},
 };
 const SERVICES = [

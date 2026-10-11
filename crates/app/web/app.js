@@ -279,6 +279,12 @@ const CAPTION_PRESETS = [
   ['karaoke', 'Karaoke', 'Full line, the spoken word lights up'],
 ];
 const PRIVACY = [['public', 'Public', 'globe'], ['unlisted', 'Unlisted', 'eyeOff'], ['private', 'Private', 'lock']];
+/** The privacy a publish form shows: the one picked, else the Preferences default. */
+const privacyOf = (pub) => pub.privacy || state.config?.publish?.privacy || 'private';
+// YouTube's assignable video categories.
+const YT_CATEGORIES = [['1', 'Film & Animation'], ['2', 'Autos & Vehicles'], ['10', 'Music'], ['15', 'Pets & Animals'], ['17', 'Sports'],
+  ['19', 'Travel & Events'], ['20', 'Gaming'], ['22', 'People & Blogs'], ['23', 'Comedy'], ['24', 'Entertainment'], ['25', 'News & Politics'],
+  ['26', 'Howto & Style'], ['27', 'Education'], ['28', 'Science & Technology'], ['29', 'Nonprofits & Activism']];
 
 /** `datetime-local` value -> ISO string (or null when empty/invalid). */
 function localToIso(value) {
@@ -892,7 +898,7 @@ function publishOptions(opts, { id, onchange, spacing = true }) {
       onchange: (v) => set('on', v) }),
     opts.on ? [
       h('select', { id: `${id}-privacy`, class: 'select sm', 'aria-label': 'Privacy', onchange: (e) => set('privacy', e.target.value) },
-        PRIVACY.map(([v, label]) => h('option', { value: v, selected: v === opts.privacy }, label))),
+        PRIVACY.map(([v, label]) => h('option', { value: v, selected: v === privacyOf(opts) }, label))),
       h('label', { class: 'inline-field' }, icon('calendar'), h('span', { class: 'sr-only' }, 'First release'),
         h('input', { type: 'datetime-local', id: `${id}-at`, class: 'input sm', value: opts.at, min: localInputValue(new Date()),
           title: 'First release (leave empty to publish on render)', onchange: (e) => set('at', e.target.value) })),
@@ -906,7 +912,7 @@ function publishBody(opts) {
   if (!opts.on || !state.youtube?.connected) return {};
   const hours = Number(opts.everyHours) || 0;
   return {
-    publish: { privacy: opts.privacy, publish_at: localToIso(opts.at) },
+    publish: { privacy: privacyOf(opts), publish_at: localToIso(opts.at) },
     publish_every_minutes: hours > 0 ? Math.round(hours * 60) : undefined,
   };
 }
@@ -977,7 +983,7 @@ function HomeView() {
   const clip = {
     url: sessionStorage.getItem('cc-draft-clip') || '',
     count: 3, len: '30-60', format: 'vertical', captions: '', also: [],
-    pub: { on: false, privacy: 'public', at: '', everyHours: '' },
+    pub: { on: false, privacy: null, at: '', everyHours: '' },
     busy: false, job: null, error: null,
   };
   let mode = sessionStorage.getItem('cc-home-mode') === 'clip' ? 'clip' : 'topic';
@@ -1184,7 +1190,7 @@ function HomeView() {
         onchange: (v) => { form.also = v; update(); } }));
       patch(clipAlso, JSON.stringify([clip.format, clip.also]), () => alsoExport({ id: 'clip-also', main: clip.format, value: clip.also,
         onchange: (v) => { clip.also = v; update(); } }));
-      patch(clipPub, JSON.stringify([state.youtube?.connected, state.youtube?.channel, clip.pub]), () =>
+      patch(clipPub, JSON.stringify([state.youtube?.connected, state.youtube?.channel, state.config?.publish?.privacy, clip.pub]), () =>
         publishOptions(clip.pub, { id: 'clip-pub', onchange: update }));
       const clipLog = clip.job ? state.logs.get(clip.job)?.at(-1) : null;
       patch(clipStatus, JSON.stringify([clip.busy, clipLog?.message, clip.error]), () => clip.busy
@@ -1335,7 +1341,7 @@ function ProjectView(id, initialTab) {
   const ui = {
     tab: initialTab || null, manualTab: !!initialTab, editing: null, edits: {},
     scriptDraft: null, showDraft: false, meta: null, drawer: null, details: false, projectDraft: null,
-    pub: { privacy: 'public', at: '', format: null },
+    pub: { privacy: null, at: '', format: null },
   };
   if (state.project?.id !== id) state.project = null;
   state.projectError = null;
@@ -1737,7 +1743,7 @@ function ProjectView(id, initialTab) {
     const busy = state.publishing.has(p.id);
     const last = busy ? (state.logs.get(p.id) || []).at(-1) : null;
     const formats = [p.format, ...(p.render.variants || []).map((v) => v.format)];
-    patch(box, JSON.stringify([yt?.connected, yt?.channel, p.published, formats, busy, last?.message, last?.progress, p.running]), () => {
+    patch(box, JSON.stringify([yt?.connected, yt?.channel, state.config?.publish?.privacy, p.published, formats, busy, last?.message, last?.progress, p.running]), () => {
       const published = (p.published || []).slice().reverse().map((rec) => {
         const scheduled = rec.publish_at && new Date(rec.publish_at) > new Date();
         return h('li', null, icon(scheduled ? 'calendar' : 'send'),
@@ -1760,16 +1766,16 @@ function ProjectView(id, initialTab) {
       const pub = ui.pub;
       if (!formats.includes(pub.format)) pub.format = p.format;
       const at = h('input', { type: 'datetime-local', id: 'pub-at', class: 'input sm', value: pub.at, min: localInputValue(new Date()),
-        disabled: pub.privacy === 'private', title: 'Leave empty to publish now',
+        disabled: privacyOf(pub) === 'private', title: 'Leave empty to publish now',
         onchange: (e) => { pub.at = e.target.value; go.replaceChildren(icon(pub.at ? 'calendar' : 'send'), pub.at ? 'Schedule' : 'Publish now'); } });
       const go = h('button', { class: 'btn primary', type: 'button', disabled: p.running, onclick: () => publishNow(p) },
-        icon(pub.at && pub.privacy !== 'private' ? 'calendar' : 'send'), pub.at && pub.privacy !== 'private' ? 'Schedule' : 'Publish now');
+        icon(pub.at && privacyOf(pub) !== 'private' ? 'calendar' : 'send'), pub.at && privacyOf(pub) !== 'private' ? 'Schedule' : 'Publish now');
       return [
         h('div', { class: 'pub-head' },
           h('div', null, h('h3', null, 'Publish to YouTube'),
             h('p', { class: 'muted' }, yt.channel ? `As ${yt.channel}. ` : '', 'Uses the title, description and hashtags above.'))),
         h('div', { class: 'pub-row' },
-          segmented({ name: 'pub-privacy', label: 'Privacy', value: pub.privacy, options: PRIVACY,
+          segmented({ name: 'pub-privacy', label: 'Privacy', value: privacyOf(pub), options: PRIVACY,
             onchange: (v) => { pub.privacy = v; at.disabled = v === 'private'; go.replaceChildren(icon(pub.at && v !== 'private' ? 'calendar' : 'send'), pub.at && v !== 'private' ? 'Schedule' : 'Publish now'); } }),
           h('label', { class: 'inline-field', title: 'Scheduled videos upload private and go public at this time' },
             icon('calendar'), h('span', { class: 'sr-only' }, 'Release time'), at),
@@ -1785,8 +1791,9 @@ function ProjectView(id, initialTab) {
   async function publishNow(p) {
     if (state.publishing.has(p.id)) return;
     const pub = ui.pub;
-    const at = pub.privacy === 'private' ? null : localToIso(pub.at);
-    if (pub.at && pub.privacy !== 'private' && !at) { toast('Pick a valid release time.', 'error'); return; }
+    const privacy = privacyOf(pub);
+    const at = privacy === 'private' ? null : localToIso(pub.at);
+    if (pub.at && privacy !== 'private' && !at) { toast('Pick a valid release time.', 'error'); return; }
     if (at && new Date(at) <= new Date()) { toast('Pick a release time in the future, or clear it to publish now.', 'error'); return; }
     const format = pub.format || p.format;
     if ((p.published || []).some((rec) => rec.format === format) && !(await confirmDialog({
@@ -1794,7 +1801,7 @@ function ProjectView(id, initialTab) {
     state.publishing.add(p.id);
     update();
     try {
-      const rec = await api('POST', `/projects/${encodeURIComponent(p.id)}/publish`, { privacy: pub.privacy, publish_at: at, format });
+      const rec = await api('POST', `/projects/${encodeURIComponent(p.id)}/publish`, { privacy, publish_at: at, format });
       toast(rec.publish_at ? `Scheduled for ${fmtWhen(rec.publish_at)}` : `Published as ${rec.privacy}`);
       pub.at = '';
       await refreshProject(p.id);
@@ -2329,7 +2336,7 @@ function QueueView() {
     topics: sessionStorage.getItem('cc-draft-queue') || '',
     format: state.config?.video?.format || 'vertical', formatTouched: false,
     seconds: '', voice: '', captions: '', also: [],
-    pub: { on: false, privacy: 'public', at: '', everyHours: '' },
+    pub: { on: false, privacy: null, at: '', everyHours: '' },
     busy: false,
   };
   const acting = new Set(); // queue item ids with a request in flight
@@ -2499,7 +2506,7 @@ function QueueView() {
       patch(voiceSel, `${state.voices.length}|${cfg?.tts?.voice}`, () => voiceOptions(form.voice));
       patch(alsoWrap, JSON.stringify([form.format, form.also]), () => alsoExport({ id: 'queue-also', main: form.format, value: form.also,
         onchange: (v) => { form.also = v; update(); } }));
-      patch(pubWrap, JSON.stringify([state.youtube?.connected, state.youtube?.channel, form.pub]), () =>
+      patch(pubWrap, JSON.stringify([state.youtube?.connected, state.youtube?.channel, state.config?.publish?.privacy, form.pub]), () =>
         publishOptions(form.pub, { id: 'queue-pub', onchange: update }));
 
       const q = state.queue;
@@ -3016,6 +3023,11 @@ function SettingsView(initialTab) {
         text('search', 'searxng_url', 'SearXNG URL', 'Local meta-search. DuckDuckGo is used when it is down.', { attrs: { type: 'url', placeholder: 'http://127.0.0.1:8888' } }),
         text('youtube', 'cookies_from_browser', 'YouTube cookies from browser', 'Helps when YouTube asks to sign in. e.g. firefox, chrome. Empty = off.', { opt: true, attrs: { placeholder: 'firefox' } }),
         h('div', { class: 'field span row gap wrap' }, sw('search', 'manage_searxng', 'Start SearXNG automatically'), sw('search', 'duckduckgo_fallback', 'DuckDuckGo fallback'))),
+      c.publish ? group('YouTube uploads', 'send', 'Defaults for publishing. Connect a channel under YouTube.',
+        select('publish', 'privacy', 'Default privacy', PRIVACY.map(([v, label]) => [v, label]), 'Preselected when you publish or queue videos.'),
+        select('publish', 'category_id', 'Category', YT_CATEGORIES.some(([v]) => v === c.publish.category_id) ? YT_CATEGORIES : [...YT_CATEGORIES, [c.publish.category_id, `Category ${c.publish.category_id}`]],
+          'The YouTube category every upload gets.'),
+        h('div', { class: 'field span' }, sw('publish', 'made_for_kids', 'Made for kids', 'Declares uploads as made for kids (COPPA). Comments and personalized ads are turned off'))) : null,
       h('div', { class: 'savebar' },
         h('span', null, 'Unsaved changes'),
         h('div', { class: 'row gap' },
