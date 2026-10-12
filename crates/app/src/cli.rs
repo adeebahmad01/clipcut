@@ -1,4 +1,4 @@
-//! Command-line batch, clip, publish and ideas. When the app is already
+//! Command-line batch, clip, publish, ideas and list. When the app is already
 //! running on this machine they go through its API, so the two never write
 //! the same queue or sign-in at once; otherwise they run here.
 
@@ -9,6 +9,7 @@ use anyhow::Context;
 use chrono::{DateTime, Local, NaiveDateTime, Utc};
 use clipcut_core::config::Format;
 use clipcut_core::timeline::CaptionPreset;
+use clipcut_core::{Project, Status};
 use clipcut_sources::IdeaSource;
 use serde_json::{Value, json};
 
@@ -564,6 +565,109 @@ pub async fn ideas(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// list
+
+const TOPIC_WIDTH: usize = 60;
+
+/// Where a project stands, in a few words.
+pub fn project_status(p: &Project) -> String {
+    let stage = |status: Status| p.stages.iter().find(|s| s.status == status);
+    if let Some(s) = stage(Status::Running) {
+        return format!("running: {}", s.stage.label().to_lowercase());
+    }
+    if let Some(s) = stage(Status::Failed) {
+        return format!("failed: {}", s.stage.label().to_lowercase());
+    }
+    if p.render.is_some() {
+        return if p.published.is_empty() {
+            "rendered".into()
+        } else {
+            "published".into()
+        };
+    }
+    if p.stages.iter().all(|s| s.status == Status::Pending) {
+        return "not started".into();
+    }
+    match p
+        .stages
+        .iter()
+        .find(|s| !matches!(s.status, Status::Done | Status::Skipped))
+    {
+        Some(s) => format!("stopped before {}", s.stage.label().to_lowercase()),
+        None => "not rendered".into(),
+    }
+}
+
+/// `0:42` for a rendered project, `-` otherwise.
+fn length(p: &Project) -> String {
+    match &p.render {
+        Some(r) => {
+            let s = r.duration_s.round() as u32;
+            format!("{}:{:02}", s / 60, s % 60)
+        }
+        None => "-".into(),
+    }
+}
+
+fn shorten(text: &str, max: usize) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.chars().count() <= max {
+        return text;
+    }
+    let cut: String = text.chars().take(max - 1).collect();
+    format!("{}…", cut.trim_end())
+}
+
+/// The `clipcut list` table, newest first.
+pub fn project_table(projects: &[Project]) -> String {
+    let rows: Vec<[String; 4]> = projects
+        .iter()
+        .map(|p| {
+            [
+                p.id.clone(),
+                project_status(p),
+                length(p),
+                shorten(&p.topic, TOPIC_WIDTH),
+            ]
+        })
+        .collect();
+    let header = ["ID", "STATUS", "LENGTH", "TOPIC"].map(String::from);
+    let width = |col: usize| {
+        std::iter::once(&header)
+            .chain(&rows)
+            .map(|r| r[col].chars().count())
+            .max()
+            .unwrap_or(0)
+    };
+    let (id_w, status_w, length_w) = (width(0), width(1), width(2));
+    std::iter::once(&header)
+        .chain(&rows)
+        .map(|[id, status, length, topic]| {
+            format!("{id:<id_w$}  {status:<status_w$}  {length:>length_w$}  {topic}\n")
+        })
+        .collect()
+}
+
+pub fn list(state: &AppState, limit: Option<usize>) -> anyhow::Result<()> {
+    let mut projects = state.store.list();
+    if projects.is_empty() {
+        println!("No projects yet. Make one with: clipcut new \"<topic>\"");
+        return Ok(());
+    }
+    let total = projects.len();
+    projects.truncate(limit.unwrap_or(total));
+    print!("{}", project_table(&projects));
+    if projects.len() < total {
+        println!(
+            "\nShowing {} of {total}; use --limit to see more.",
+            projects.len()
+        );
+    }
+    println!("\nProjects are in {}", state.paths.projects().display());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,5 +715,68 @@ mod tests {
         assert!(privacy_plan(Some("secret".into()), None).is_err());
         let plan = privacy_plan(Some("Unlisted".into()), None).unwrap().unwrap();
         assert_eq!(plan.privacy, "unlisted");
+    }
+
+    fn at(p: &mut Project, stage: clipcut_core::Stage, status: Status) {
+        p.stages
+            .iter_mut()
+            .find(|s| s.stage == stage)
+            .unwrap()
+            .status = status;
+    }
+
+    #[test]
+    fn status_says_where_a_project_stands() {
+        use crate::test_support::{clip_project, finished_project};
+        use clipcut_core::Stage;
+
+        let mut p = finished_project();
+        assert_eq!(project_status(&p), "rendered");
+        p.published = serde_json::from_value(json!([{
+            "platform": "youtube", "format": "vertical", "video_id": "x",
+            "url": "https://youtu.be/x", "privacy": "unlisted", "uploaded_at": Utc::now()
+        }]))
+        .unwrap();
+        assert_eq!(project_status(&p), "published");
+
+        p.render = None;
+        at(&mut p, Stage::Assets, Status::Running);
+        assert_eq!(project_status(&p), "running: visuals");
+        at(&mut p, Stage::Assets, Status::Done);
+        at(&mut p, Stage::Voice, Status::Failed);
+        assert_eq!(project_status(&p), "failed: voiceover");
+        at(&mut p, Stage::Voice, Status::Pending);
+        at(&mut p, Stage::Render, Status::Pending);
+        assert_eq!(project_status(&p), "stopped before voiceover");
+
+        let new = Project::new("Fresh", "", Format::Vertical, 30);
+        assert_eq!(project_status(&new), "not started");
+        // Clips skip research, hooks and script, and start with their beat.
+        assert_eq!(project_status(&clip_project()), "stopped before visuals");
+    }
+
+    #[test]
+    fn table_aligns_columns_and_shortens_topics() {
+        let mut done = crate::test_support::finished_project();
+        done.render.as_mut().unwrap().duration_s = 61.6;
+        let mut new = Project::new(
+            format!("A very long topic {}", "that keeps going ".repeat(10)),
+            "",
+            Format::Vertical,
+            30,
+        );
+        new.id = "short".into();
+        let table = project_table(&[done.clone(), new]);
+        let lines: Vec<&str> = table.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].starts_with("ID "));
+        let cells: Vec<&str> = lines[1].split_whitespace().collect();
+        assert_eq!(&cells[1..], ["rendered", "1:02", "A", "fixture", "topic"]);
+        assert_eq!(lines[0].find("STATUS"), lines[1].find("rendered"));
+        assert_eq!(lines[0].find("TOPIC"), lines[1].find("A fixture"));
+        assert_eq!(lines[2].find("not started"), lines[1].find("rendered"));
+        let topic = lines[2].rsplit("  ").next().unwrap();
+        assert_eq!(topic.chars().count(), TOPIC_WIDTH);
+        assert!(topic.ends_with('…'));
     }
 }
