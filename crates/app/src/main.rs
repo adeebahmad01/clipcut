@@ -74,6 +74,12 @@ enum Command {
     },
     /// Re-render an existing project.
     Render { id: String },
+    /// List projects, newest first, with their IDs and where each one stands.
+    List {
+        /// Show only the newest N.
+        #[arg(long, short = 'n', value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
+        limit: Option<usize>,
+    },
     /// Make one video per line of a text file (blank and # lines are skipped).
     Batch {
         file: PathBuf,
@@ -220,6 +226,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Run { id, from, only } => run_headless(&state, &id, from, only).await,
         Command::Render { id } => run_headless(&state, &id, Some(Stage::Render), true).await,
+        Command::List { limit } => cli::list(&state, limit),
         Command::Batch {
             file,
             publish,
