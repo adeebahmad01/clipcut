@@ -299,6 +299,8 @@ clipcut batch topics.txt --publish public --start "2026-10-12 15:00" --every 1d
 `--every` (`90m`, `2h`, `1d`) spaces the release times.
 
 ```bash
+clipcut list                                  # every project's ID, status, length and topic
+clipcut list -n 5                             # only the newest five
 clipcut run <project-id> --from script        # redo script and everything after it
 clipcut run <project-id> --from assets --only # only redo visuals
 clipcut render <project-id>                   # re-render
@@ -307,8 +309,18 @@ clipcut setup all                             # or: yt-dlp, kokoro, searxng
 ```
 
 Stage names for `--from` are `research`, `hooks`, `script`, `beats`,
-`assets`, `voice` and `render`. Project IDs are the folder names under
-`projects/`, and are shown in the app's URL (`#/p/<id>`).
+`assets`, `voice` and `render`. `clipcut list` prints the project IDs,
+newest first:
+
+```
+ID                      STATUS               LENGTH  TOPIC
+20261012-091500-3fa9c1  published              0:42  Why the Moon is drifting away
+20261011-180210-b07e44  failed: voiceover         -  How Australia lost the Great Emu War
+20261011-120033-9d21aa  stopped before hook       -  The loudest sound ever recorded
+```
+
+They are also the folder names under `projects/`, and are shown in the
+app's URL (`#/p/<id>`).
 
 Set `RUST_LOG=debug` for detailed logs.
 

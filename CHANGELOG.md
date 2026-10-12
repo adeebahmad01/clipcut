@@ -22,6 +22,9 @@ follow [Semantic Versioning](https://semver.org/).
   `config.toml`): the default privacy, the category and "made for kids".
   Uploads now use them; publishing without a privacy is private unless you
   change the default.
+- `clipcut list` prints every project's ID, status (running, failed,
+  stopped before a stage, rendered or published), length and topic, newest
+  first, so you can find the ID for `run`, `render` and `publish`.
 - `.srt` and `.vtt` caption files and a 1280×720 thumbnail with every
   render.
 - Docs for all of the above in Usage, Configuration, API, Architecture and
