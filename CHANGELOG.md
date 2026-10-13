@@ -25,6 +25,9 @@ follow [Semantic Versioning](https://semver.org/).
 - `clipcut list` prints every project's ID, status (running, failed,
   stopped before a stage, rendered or published), length and topic, newest
   first, so you can find the ID for `run`, `render` and `publish`.
+- `run`, `render` and `publish` accept the last few characters of a
+  project ID (`clipcut render 3fa9c1`), its start, or `latest` for the
+  newest project. An ambiguous ID lists the projects it matches.
 - `.srt` and `.vtt` caption files and a 1280×720 thumbnail with every
   render.
 - Docs for all of the above in Usage, Configuration, API, Architecture and
