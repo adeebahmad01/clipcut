@@ -322,6 +322,18 @@ ID                      STATUS               LENGTH  TOPIC
 They are also the folder names under `projects/`, and are shown in the
 app's URL (`#/p/<id>`).
 
+`run`, `render` and `publish` don't need the whole ID. Give its last few
+characters (`3fa9c1`), its start (`20261012-0915`), or `latest` for the
+newest project. Any part of at least four characters works as long as only
+one project's ID starts or ends with it; otherwise ClipCut lists the
+matches and asks for more:
+
+```bash
+clipcut render 3fa9c1
+clipcut run latest --from voice
+clipcut publish latest --privacy unlisted
+```
+
 Set `RUST_LOG=debug` for detailed logs.
 
 ## Projects on disk

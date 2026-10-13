@@ -1,6 +1,7 @@
-//! Command-line batch, clip, publish, ideas and list. When the app is already
-//! running on this machine they go through its API, so the two never write
-//! the same queue or sign-in at once; otherwise they run here.
+//! Command-line batch, clip, publish, ideas and list, and finding a project
+//! from part of its ID. When the app is already running on this machine they
+//! go through its API, so the two never write the same queue or sign-in at
+//! once; otherwise they run here.
 
 use std::path::Path;
 use std::time::Duration;
@@ -374,6 +375,7 @@ pub async fn publish(state: AppState, args: PublishArgs) -> anyhow::Result<()> {
         }
         anyhow::bail!("give a project id, or --connect to sign in to YouTube");
     };
+    let id = resolve_id(&state, &id)?;
     let privacy = args
         .privacy
         .unwrap_or_else(|| state.config().publish.privacy);
@@ -668,6 +670,52 @@ pub fn list(state: &AppState, limit: Option<usize>) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// project ids
+
+/// Shortest start or end of an ID that `resolve_id` matches on.
+const MIN_ID_PART: usize = 4;
+
+/// The project `query` names: its full ID, `latest` for the newest project,
+/// or the start or end of one ID (at least four characters), such as the
+/// six random characters at the end.
+pub fn resolve_id(state: &AppState, query: &str) -> anyhow::Result<String> {
+    let query = query.trim();
+    if state.store.exists(query) {
+        return Ok(query.to_string());
+    }
+    let projects = state.store.list();
+    if query.eq_ignore_ascii_case("latest") {
+        return projects
+            .first()
+            .map(|p| p.id.clone())
+            .context("there are no projects yet");
+    }
+    anyhow::ensure!(
+        query.chars().count() >= MIN_ID_PART,
+        "no project has the ID {query:?}; give the full ID, at least its first or last \
+         {MIN_ID_PART} characters, or `latest` (`clipcut list` shows the IDs)"
+    );
+    let query = query.to_ascii_lowercase();
+    let matches: Vec<&str> = projects
+        .iter()
+        .map(|p| p.id.as_str())
+        .filter(|id| id.starts_with(&query) || id.ends_with(&query))
+        .collect();
+    match matches[..] {
+        [id] => Ok(id.to_string()),
+        [] => anyhow::bail!("no project matches {query:?}; `clipcut list` shows the IDs"),
+        _ => {
+            let shown = matches[..matches.len().min(5)].join(", ");
+            let more = if matches.len() > 5 { ", …" } else { "" };
+            anyhow::bail!(
+                "{query:?} matches {} projects ({shown}{more}); give more of the ID",
+                matches.len()
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -778,5 +826,44 @@ mod tests {
         let topic = lines[2].rsplit("  ").next().unwrap();
         assert_eq!(topic.chars().count(), TOPIC_WIDTH);
         assert!(topic.ends_with('…'));
+    }
+
+    #[tokio::test]
+    async fn ids_resolve_from_their_start_or_end_or_latest() {
+        let home = crate::test_support::TestHome::new();
+        let state = home.state();
+        let err = |q: &str| resolve_id(&state, q).unwrap_err().to_string();
+        assert!(err("latest").contains("no projects"));
+
+        let started = Utc::now();
+        for (n, id) in [
+            "20261011-120033-9d21aa",
+            "20261011-180210-b07e44",
+            "20261012-091500-3fa9c1",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut p = Project::new("Fixture", "", Format::Vertical, 30);
+            p.id = id.into();
+            p.created_at = started + chrono::Duration::minutes(n as i64);
+            state.store.create(p).await.unwrap();
+        }
+        let found = |q: &str| resolve_id(&state, q).unwrap();
+
+        assert_eq!(found("20261011-120033-9d21aa"), "20261011-120033-9d21aa");
+        assert_eq!(found(" 3fa9c1 "), "20261012-091500-3fa9c1");
+        assert_eq!(found("B07E44"), "20261011-180210-b07e44");
+        assert_eq!(found("7e44"), "20261011-180210-b07e44");
+        assert_eq!(found("20261012"), "20261012-091500-3fa9c1");
+        assert_eq!(found("Latest"), "20261012-091500-3fa9c1");
+
+        assert!(err("20261011").contains("matches 2 projects"));
+        assert!(err("ffffff").contains("no project matches"));
+        // Too short to be trusted, even though only one ID ends this way.
+        assert!(err("aa").contains("at least its first or last 4"));
+        // Only the start or end counts, never the middle.
+        assert!(err("091500").contains("no project matches"));
+        assert!(err("../projects").contains("no project matches"));
     }
 }

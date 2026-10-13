@@ -66,6 +66,7 @@ enum Command {
     },
     /// Continue or re-run a project: `clipcut run <id> --from assets`.
     Run {
+        /// Project ID, its last few characters, or `latest`.
         id: String,
         #[arg(long, value_parser = parse_stage)]
         from: Option<Stage>,
@@ -73,7 +74,10 @@ enum Command {
         only: bool,
     },
     /// Re-render an existing project.
-    Render { id: String },
+    Render {
+        /// Project ID, its last few characters, or `latest`.
+        id: String,
+    },
     /// List projects, newest first, with their IDs and where each one stands.
     List {
         /// Show only the newest N.
@@ -124,6 +128,7 @@ enum Command {
     },
     /// Upload a rendered project to YouTube; `--connect` signs in first.
     Publish {
+        /// Project ID, its last few characters, or `latest`.
         id: Option<String>,
         /// public, unlisted or private; default: `privacy` under [publish] in config.toml.
         #[arg(long)]
@@ -224,8 +229,14 @@ async fn main() -> anyhow::Result<()> {
             println!("Project {}", project.id);
             run_headless(&state, &project.id, None, false).await
         }
-        Command::Run { id, from, only } => run_headless(&state, &id, from, only).await,
-        Command::Render { id } => run_headless(&state, &id, Some(Stage::Render), true).await,
+        Command::Run { id, from, only } => {
+            let id = cli::resolve_id(&state, &id)?;
+            run_headless(&state, &id, from, only).await
+        }
+        Command::Render { id } => {
+            let id = cli::resolve_id(&state, &id)?;
+            run_headless(&state, &id, Some(Stage::Render), true).await
+        }
         Command::List { limit } => cli::list(&state, limit),
         Command::Batch {
             file,
