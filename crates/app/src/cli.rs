@@ -1,7 +1,7 @@
-//! Command-line batch, clip, publish, ideas and list, and finding a project
-//! from part of its ID. When the app is already running on this machine they
-//! go through its API, so the two never write the same queue or sign-in at
-//! once; otherwise they run here.
+//! Command-line batch, clip, publish, ideas, list and delete, and finding a
+//! project from part of its ID. When the app is already running on this
+//! machine they go through its API, so the two never write the same queue or
+//! sign-in at once; otherwise they run here.
 
 use std::path::Path;
 use std::time::Duration;
@@ -671,6 +671,156 @@ pub fn list(state: &AppState, limit: Option<usize>) -> anyhow::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// delete
+
+/// Bytes used by the files under `path`. Symlinks are counted, not followed.
+pub fn disk_usage(path: &Path) -> u64 {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if !meta.is_dir() {
+        return meta.len();
+    }
+    std::fs::read_dir(path)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| disk_usage(&e.path()))
+        .sum()
+}
+
+/// `512 B`, `12 KB`, `420 MB`, `1.3 GB`.
+pub fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
+    if bytes < 1000 {
+        return format!("{bytes} B");
+    }
+    let mut size = bytes as f64 / 1000.0;
+    let mut unit = 0;
+    while size >= 999.5 && unit < UNITS.len() - 1 {
+        size /= 1000.0;
+        unit += 1;
+    }
+    if size < 9.95 {
+        format!("{size:.1} {}", UNITS[unit])
+    } else {
+        format!("{size:.0} {}", UNITS[unit])
+    }
+}
+
+pub struct DeleteArgs {
+    pub ids: Vec<String>,
+    pub yes: bool,
+    pub force: bool,
+}
+
+/// The projects `ids` name, once each, in the order given. A project with a
+/// running stage is refused unless `force`: it may be running in another
+/// `clipcut` command, or be left over from a crash.
+pub fn projects_to_delete(
+    state: &AppState,
+    ids: &[String],
+    force: bool,
+) -> anyhow::Result<Vec<Project>> {
+    let mut projects: Vec<Project> = Vec::new();
+    for query in ids {
+        let id = resolve_id(state, query)?;
+        if projects.iter().any(|p| p.id == id) {
+            continue;
+        }
+        let project = state.store.get(&id)?;
+        if !force && let Some(s) = project.stages.iter().find(|s| s.status == Status::Running) {
+            anyhow::bail!(
+                "{id} is running ({}); stop it first, or pass --force if ClipCut quit \
+                 while it ran",
+                s.stage.label().to_lowercase()
+            );
+        }
+        projects.push(project);
+    }
+    Ok(projects)
+}
+
+/// Whether the running app keeps this project in the same folder: a one-off
+/// file written there must come back through the app. A different data
+/// directory (`--home`) can hold a copy of the same project, and the app must
+/// not delete its copy instead.
+async fn app_serves_folder(base: &str, id: &str, dir: &Path) -> bool {
+    let token = uuid::Uuid::new_v4().to_string();
+    let name = format!(".delete-check-{token}");
+    let marker = dir.join(&name);
+    if std::fs::write(&marker, &token).is_err() {
+        return false;
+    }
+    let seen = async {
+        let resp = reqwest::Client::new()
+            .get(format!("{base}/projects/{id}/files/{name}"))
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .ok()?;
+        resp.status().is_success().then_some(())?;
+        resp.text().await.ok()
+    }
+    .await;
+    let _ = std::fs::remove_file(&marker);
+    seen.as_deref() == Some(token.as_str())
+}
+
+pub async fn delete(state: &AppState, args: DeleteArgs) -> anyhow::Result<()> {
+    let projects = projects_to_delete(state, &args.ids, args.force)?;
+    let size: u64 = projects
+        .iter()
+        .map(|p| disk_usage(&state.store.dir(&p.id)))
+        .sum();
+    print!("{}", project_table(&projects));
+    if !args.yes {
+        use std::io::{IsTerminal, Write};
+        anyhow::ensure!(
+            std::io::stdin().is_terminal(),
+            "pass --yes to delete without being asked"
+        );
+        let what = match projects.len() {
+            1 => "this project".to_string(),
+            n => format!("these {n} projects"),
+        };
+        print!("\nDelete {what} and free {}? [y/N] ", human_size(size));
+        std::io::stdout().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+            println!("Nothing deleted.");
+            return Ok(());
+        }
+    }
+    // The app stops a project it is running before deleting it.
+    let app = running_app(state).await;
+    for p in &projects {
+        let dir = state.store.dir(&p.id);
+        match &app {
+            Some(base) if app_serves_folder(base, &p.id, &dir).await => {
+                api(
+                    reqwest::Method::DELETE,
+                    &format!("{base}/projects/{}", p.id),
+                    None,
+                )
+                .await
+                .with_context(|| format!("could not delete {}", p.id))?;
+            }
+            _ => state
+                .store
+                .delete(&p.id)
+                .await
+                .with_context(|| format!("could not delete {}", p.id))?,
+        }
+    }
+    let n = projects.len();
+    let noun = if n == 1 { "project" } else { "projects" };
+    println!("Deleted {n} {noun}, freeing {}.", human_size(size));
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // project ids
 
 /// Shortest start or end of an ID that `resolve_id` matches on.
@@ -865,5 +1015,142 @@ mod tests {
         // Only the start or end counts, never the middle.
         assert!(err("091500").contains("no project matches"));
         assert!(err("../projects").contains("no project matches"));
+    }
+
+    #[test]
+    fn sizes_read_in_round_units() {
+        assert_eq!(human_size(0), "0 B");
+        assert_eq!(human_size(999), "999 B");
+        assert_eq!(human_size(1_000), "1.0 KB");
+        assert_eq!(human_size(12_400), "12 KB");
+        assert_eq!(human_size(420_000_000), "420 MB");
+        assert_eq!(human_size(999_600), "1.0 MB");
+        assert_eq!(human_size(1_340_000_000), "1.3 GB");
+        assert_eq!(human_size(5_000_000_000_000_000), "5000 TB");
+    }
+
+    #[test]
+    fn disk_usage_adds_up_nested_files() {
+        let home = crate::test_support::TestHome::new();
+        let dir = home.0.join("p");
+        std::fs::create_dir_all(dir.join("render")).unwrap();
+        std::fs::write(dir.join("project.json"), [0u8; 300]).unwrap();
+        std::fs::write(dir.join("render/final.mp4"), [0u8; 1200]).unwrap();
+        assert_eq!(disk_usage(&dir), 1500);
+        assert_eq!(disk_usage(&dir.join("render/final.mp4")), 1200);
+        assert_eq!(disk_usage(&dir.join("missing")), 0);
+    }
+
+    async fn fixture_projects(state: &AppState, ids: &[&str]) {
+        let started = Utc::now();
+        for (n, id) in ids.iter().enumerate() {
+            let mut p = Project::new("Fixture", "", Format::Vertical, 30);
+            p.id = id.to_string();
+            p.created_at = started + chrono::Duration::minutes(n as i64);
+            state.store.create(p).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_picks_each_project_once_and_spares_running_ones() {
+        let home = crate::test_support::TestHome::new();
+        let state = home.state();
+        fixture_projects(
+            &state,
+            &["20261011-120033-9d21aa", "20261012-091500-3fa9c1"],
+        )
+        .await;
+        let ids = |qs: &[&str]| qs.iter().map(|q| q.to_string()).collect::<Vec<_>>();
+
+        let picked = projects_to_delete(&state, &ids(&["3fa9c1", "latest", "9d21aa"]), false)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect::<Vec<_>>();
+        assert_eq!(picked, ["20261012-091500-3fa9c1", "20261011-120033-9d21aa"]);
+        // One bad ID stops the whole command before anything is deleted.
+        assert!(projects_to_delete(&state, &ids(&["3fa9c1", "ffffff"]), false).is_err());
+
+        state
+            .store
+            .update("20261012-091500-3fa9c1", |p| {
+                at(p, clipcut_core::Stage::Script, Status::Running);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let err = projects_to_delete(&state, &ids(&["3fa9c1"]), false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("is running (script)"), "{err}");
+        assert_eq!(
+            projects_to_delete(&state, &ids(&["3fa9c1"]), true)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_removes_folders_here_or_through_the_running_app() {
+        let home = crate::test_support::TestHome::new();
+        let state = home.state();
+        let ids = [
+            "20261011-120033-9d21aa",
+            "20261012-091500-3fa9c1",
+            "20261013-100000-c0ffee",
+        ];
+        fixture_projects(&state, &ids).await;
+        let set_port = |port: u16| {
+            let mut config = state.config();
+            config.server.port = port;
+            state.set_config(config).unwrap();
+        };
+        let delete_args = |id: &str| DeleteArgs {
+            ids: vec![id.into()],
+            yes: true,
+            force: false,
+        };
+        let serve = async |app_state: AppState| {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            app_state.set_bound_port(port);
+            let app = crate::server::router(app_state);
+            (
+                port,
+                tokio::spawn(async move { axum::serve(listener, app).await.unwrap() }),
+            )
+        };
+
+        // Nothing listening: the folder is removed here.
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        set_port(free.local_addr().unwrap().port());
+        drop(free);
+        assert!(running_app(&state).await.is_none());
+        delete(&state, delete_args("9d21aa")).await.unwrap();
+        assert!(!state.store.exists(ids[0]));
+
+        // The app is up on this home: it deletes the project.
+        let (port, server) = serve(state.clone()).await;
+        set_port(port);
+        let base = running_app(&state).await.unwrap();
+        assert!(app_serves_folder(&base, ids[1], &state.store.dir(ids[1])).await);
+        delete(&state, delete_args("3fa9c1")).await.unwrap();
+        server.abort();
+        assert!(!state.store.exists(ids[1]));
+
+        // An app on another home with a copy of the project keeps its copy.
+        let other_home = crate::test_support::TestHome::new();
+        let other = other_home.state();
+        fixture_projects(&other, &ids[2..]).await;
+        let (port, server) = serve(other.clone()).await;
+        set_port(port);
+        assert!(running_app(&state).await.is_some());
+        delete(&state, delete_args("c0ffee")).await.unwrap();
+        server.abort();
+        assert!(!state.store.exists(ids[2]));
+        assert!(other.store.exists(ids[2]));
+        let leftovers = std::fs::read_dir(other.store.dir(ids[2])).unwrap().count();
+        assert_eq!(leftovers, 1, "only project.json is left");
     }
 }

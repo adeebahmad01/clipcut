@@ -304,6 +304,7 @@ clipcut list -n 5                             # only the newest five
 clipcut run <project-id> --from script        # redo script and everything after it
 clipcut run <project-id> --from assets --only # only redo visuals
 clipcut render <project-id>                   # re-render
+clipcut delete <project-id>...                # delete projects and their files
 clipcut doctor                                # check every dependency
 clipcut setup all                             # or: yt-dlp, kokoro, searxng
 ```
@@ -322,7 +323,7 @@ ID                      STATUS               LENGTH  TOPIC
 They are also the folder names under `projects/`, and are shown in the
 app's URL (`#/p/<id>`).
 
-`run`, `render` and `publish` don't need the whole ID. Give its last few
+`run`, `render`, `publish` and `delete` don't need the whole ID. Give its last few
 characters (`3fa9c1`), its start (`20261012-0915`), or `latest` for the
 newest project. Any part of at least four characters works as long as only
 one project's ID starts or ends with it; otherwise ClipCut lists the
@@ -332,6 +333,18 @@ matches and asks for more:
 clipcut render 3fa9c1
 clipcut run latest --from voice
 clipcut publish latest --privacy unlisted
+```
+
+`clipcut delete` shows the projects it matched and how much space they
+use, and asks before deleting them. `--yes` (`-y`) skips the question,
+which scripts need. A project with a running stage is left alone: stop it
+first, or pass `--force` if ClipCut quit while it was running. When the app
+is running on the same data directory, the CLI asks it to do the deleting,
+so it stops anything it is doing with the project first.
+
+```bash
+clipcut delete 3fa9c1 b07e44
+clipcut delete latest --yes
 ```
 
 Set `RUST_LOG=debug` for detailed logs.
@@ -353,7 +366,8 @@ render/thumb.jpg    the 1280×720 thumbnail (thumb.png is the full-size cover)
 render/credits.txt  every source used
 ```
 
-You can delete a project from the app, or just remove its folder.
+You can delete a project from the app, with `clipcut delete <id>`, or by
+removing its folder.
 
 Next to `projects/`, `queue.json` holds the [queue](#the-queue) and
 `youtube-oauth.json` the [YouTube](#publish-to-youtube) client and
