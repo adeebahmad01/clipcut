@@ -84,6 +84,18 @@ enum Command {
         #[arg(long, short = 'n', value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
         limit: Option<usize>,
     },
+    /// Delete projects and their files: `clipcut delete 3fa9c1 b07e44`.
+    Delete {
+        /// Project IDs, their last few characters, or `latest`.
+        #[arg(required = true)]
+        ids: Vec<String>,
+        /// Don't ask first.
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Also delete projects marked as running.
+        #[arg(long)]
+        force: bool,
+    },
     /// Make one video per line of a text file (blank and # lines are skipped).
     Batch {
         file: PathBuf,
@@ -238,6 +250,9 @@ async fn main() -> anyhow::Result<()> {
             run_headless(&state, &id, Some(Stage::Render), true).await
         }
         Command::List { limit } => cli::list(&state, limit),
+        Command::Delete { ids, yes, force } => {
+            cli::delete(&state, cli::DeleteArgs { ids, yes, force }).await
+        }
         Command::Batch {
             file,
             publish,
