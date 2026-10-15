@@ -28,6 +28,10 @@ follow [Semantic Versioning](https://semver.org/).
 - `run`, `render` and `publish` accept the last few characters of a
   project ID (`clipcut render 3fa9c1`), its start, or `latest` for the
   newest project. An ambiguous ID lists the projects it matches.
+- `clipcut show <id>` prints one project: its topic, title and video
+  settings, how long each stage took or why it failed, the path of every
+  file it made (flagging missing ones) and its YouTube links. `--path`
+  prints only the video's path and `--json` the whole project, for scripts.
 - `clipcut delete <id>...` removes projects and their files. It lists
   what it matched with the space it frees and asks first (`--yes` skips
   that), skips running projects unless you pass `--force`, and goes

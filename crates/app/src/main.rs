@@ -84,6 +84,17 @@ enum Command {
         #[arg(long, short = 'n', value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
         limit: Option<usize>,
     },
+    /// Show one project: how each stage went, its files and where it was published.
+    Show {
+        /// Project ID, its last few characters, or `latest`.
+        id: String,
+        /// Print only the video's path, for scripts.
+        #[arg(long, conflicts_with = "json")]
+        path: bool,
+        /// Print the whole project as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Delete projects and their files: `clipcut delete 3fa9c1 b07e44`.
     Delete {
         /// Project IDs, their last few characters, or `latest`.
@@ -250,6 +261,7 @@ async fn main() -> anyhow::Result<()> {
             run_headless(&state, &id, Some(Stage::Render), true).await
         }
         Command::List { limit } => cli::list(&state, limit),
+        Command::Show { id, path, json } => cli::show(&state, &id, path, json),
         Command::Delete { ids, yes, force } => {
             cli::delete(&state, cli::DeleteArgs { ids, yes, force }).await
         }
