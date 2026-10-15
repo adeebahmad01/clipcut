@@ -1,4 +1,4 @@
-//! Command-line batch, clip, publish, ideas, list and delete, and finding a
+//! Command-line batch, clip, publish, ideas, list, show and delete, and finding a
 //! project from part of its ID. When the app is already running on this
 //! machine they go through its API, so the two never write the same queue or
 //! sign-in at once; otherwise they run here.
@@ -10,7 +10,7 @@ use anyhow::Context;
 use chrono::{DateTime, Local, NaiveDateTime, Utc};
 use clipcut_core::config::Format;
 use clipcut_core::timeline::CaptionPreset;
-use clipcut_core::{Project, Status};
+use clipcut_core::{Project, StageState, Status};
 use clipcut_sources::IdeaSource;
 use serde_json::{Value, json};
 
@@ -604,16 +604,24 @@ pub fn project_status(p: &Project) -> String {
 /// `0:42` for a rendered project, `-` otherwise.
 fn length(p: &Project) -> String {
     match &p.render {
-        Some(r) => {
-            let s = r.duration_s.round() as u32;
-            format!("{}:{:02}", s / 60, s % 60)
-        }
+        Some(r) => clock(r.duration_s),
         None => "-".into(),
     }
 }
 
+/// `1:05` for 65 seconds.
+fn clock(seconds: f32) -> String {
+    let s = seconds.max(0.0).round() as u32;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// `text` on one line, with runs of whitespace collapsed.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn shorten(text: &str, max: usize) -> String {
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = one_line(text);
     if text.chars().count() <= max {
         return text;
     }
@@ -668,6 +676,184 @@ pub fn list(state: &AppState, limit: Option<usize>) -> anyhow::Result<()> {
     }
     println!("\nProjects are in {}", state.paths.projects().display());
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// show
+
+/// `12s`, `3m 05s`, `1h 02m`.
+fn took(seconds: i64) -> String {
+    let s = seconds.max(0);
+    match s {
+        0..60 => format!("{s}s"),
+        60..3600 => format!("{}m {:02}s", s / 60, s % 60),
+        _ => format!("{}h {:02}m", s / 3600, s % 3600 / 60),
+    }
+}
+
+/// How a stage went: `done in 12s`, `running 40%: Downloading`, `failed: …`.
+fn stage_line(s: &StageState) -> String {
+    match s.status {
+        Status::Pending => "pending".into(),
+        Status::Skipped => "skipped".into(),
+        Status::Done => match (s.started_at, s.finished_at) {
+            (Some(start), Some(end)) if end >= start => {
+                format!("done in {}", took((end - start).num_seconds()))
+            }
+            _ => "done".into(),
+        },
+        Status::Running => {
+            let percent = (s.progress.clamp(0.0, 1.0) * 100.0).round();
+            match one_line(&s.message) {
+                m if m.is_empty() => format!("running {percent}%"),
+                m => format!("running {percent}%: {m}"),
+            }
+        }
+        Status::Failed => match s.error.as_deref().map(one_line) {
+            Some(e) if !e.is_empty() => format!("failed: {e}"),
+            _ => "failed".into(),
+        },
+    }
+}
+
+fn local_time(t: DateTime<Utc>) -> String {
+    t.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string()
+}
+
+/// The `clipcut show` report: what the project is, how each stage went, the
+/// files it made (flagging any that are gone) and where it was published.
+pub fn project_details(p: &Project, dir: &Path) -> String {
+    let mut about: Vec<(&str, String)> = vec![("Topic", one_line(&p.topic))];
+    if let Some(title) = p.script.as_ref().map(|s| one_line(&s.title))
+        && !title.is_empty()
+    {
+        about.push(("Title", title));
+    }
+    if let Some(clip) = &p.clip {
+        let by = match one_line(&clip.channel) {
+            c if c.is_empty() => String::new(),
+            c => format!(" by {c}"),
+        };
+        about.push((
+            "Clip of",
+            format!(
+                "{}{by}, {}–{}",
+                one_line(&clip.title),
+                clock(clip.start_s),
+                clock(clip.end_s)
+            ),
+        ));
+        about.push(("Source", clip.url.clone()));
+    }
+    let mut video = p.format.slug().to_string();
+    if !p.extra_formats.is_empty() {
+        let also: Vec<&str> = p.extra_formats.iter().map(|f| f.slug()).collect();
+        video += &format!(" (also {})", also.join(", "));
+    }
+    video += &format!(", {}s target", p.target_seconds);
+    if let Some(preset) = p.caption_preset {
+        video += &format!(", {} captions", preset.slug());
+    }
+    let voice = p
+        .voice_track
+        .as_ref()
+        .map(|v| v.voice.clone())
+        .or_else(|| p.voice.clone());
+    if let Some(voice) = voice.filter(|v| !v.is_empty()) {
+        video += &format!(", voice {voice}");
+    }
+    about.push(("Video", video));
+    about.push(("Created", local_time(p.created_at)));
+
+    let mut out = format!("{}  {}\n\n", p.id, project_status(p));
+    for (name, value) in about {
+        out += &format!("{:<9}{value}\n", format!("{name}:"));
+    }
+
+    out += "\nStages\n";
+    for s in &p.stages {
+        out += &format!("  {:<12}{}\n", s.stage.label(), stage_line(s));
+    }
+
+    let file = |rel: &str, note: String| {
+        let path = dir.join(rel);
+        let missing = if path.exists() { "" } else { "  (missing)" };
+        format!("{}{note}{missing}", path.display())
+    };
+    let mut files: Vec<(String, String)> = Vec::new();
+    if let Some(r) = &p.render {
+        files.push((
+            "Video".into(),
+            file(
+                &r.path,
+                format!("  ({}, {}x{})", clock(r.duration_s), r.width, r.height),
+            ),
+        ));
+        for v in &r.variants {
+            let mut name = v.format.slug().to_string();
+            name[..1].make_ascii_uppercase();
+            files.push((name, file(&v.path, format!("  ({}x{})", v.width, v.height))));
+        }
+        if let Some(subs) = &r.subtitles {
+            files.push(("Captions".into(), file(&subs.srt, String::new())));
+            files.push((String::new(), file(&subs.vtt, String::new())));
+        }
+        if let Some(thumb) = &r.thumbnail_jpg {
+            files.push(("Thumbnail".into(), file(thumb, String::new())));
+        }
+        files.push(("Credits".into(), file(&r.credits_path, String::new())));
+    }
+    files.push((
+        "Folder".into(),
+        format!("{}  ({})", dir.display(), human_size(disk_usage(dir))),
+    ));
+    out += "\nFiles\n";
+    for (name, value) in files {
+        out += &format!("  {name:<11}{value}\n");
+    }
+
+    if !p.published.is_empty() {
+        out += "\nPublished\n";
+        for r in &p.published {
+            let when = match r.publish_at {
+                Some(at) => format!("releases {}", local_time(at)),
+                None => format!("uploaded {}", local_time(r.uploaded_at)),
+            };
+            out += &format!(
+                "  {} {}  {}  {}  {when}\n",
+                r.platform,
+                r.format.slug(),
+                r.privacy,
+                r.url
+            );
+        }
+    }
+    out
+}
+
+pub fn show(state: &AppState, query: &str, path: bool, json: bool) -> anyhow::Result<()> {
+    use std::io::Write;
+    let id = resolve_id(state, query)?;
+    let project = state.store.get(&id)?;
+    let dir = state.store.dir(&id);
+    let text = if json {
+        serde_json::to_string_pretty(&project)? + "\n"
+    } else if path {
+        let render = project.render.as_ref().with_context(|| {
+            format!(
+                "{id} has no video yet ({}); `clipcut run {id}` finishes it",
+                project_status(&project)
+            )
+        })?;
+        format!("{}\n", dir.join(&render.path).display())
+    } else {
+        project_details(&project, &dir)
+    };
+    // `clipcut show latest --json | head` closes the pipe early; that's fine.
+    match std::io::stdout().lock().write_all(text.as_bytes()) {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        written => Ok(written?),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -976,6 +1162,114 @@ mod tests {
         let topic = lines[2].rsplit("  ").next().unwrap();
         assert_eq!(topic.chars().count(), TOPIC_WIDTH);
         assert!(topic.ends_with('…'));
+    }
+
+    #[test]
+    fn stage_lines_say_how_each_went() {
+        assert_eq!(took(12), "12s");
+        assert_eq!(took(185), "3m 05s");
+        assert_eq!(took(3720), "1h 02m");
+        assert_eq!(took(-4), "0s");
+
+        let mut s: StageState = serde_json::from_value(json!({
+            "stage": "assets", "status": "pending"
+        }))
+        .unwrap();
+        assert_eq!(stage_line(&s), "pending");
+        s.status = Status::Running;
+        s.progress = 0.4;
+        s.message = "Downloading\n beat 3".into();
+        assert_eq!(stage_line(&s), "running 40%: Downloading beat 3");
+        s.status = Status::Failed;
+        s.error = Some("yt-dlp: 403\nForbidden".into());
+        assert_eq!(stage_line(&s), "failed: yt-dlp: 403 Forbidden");
+        s.status = Status::Done;
+        assert_eq!(stage_line(&s), "done");
+        let start = Utc::now();
+        s.started_at = Some(start);
+        s.finished_at = Some(start + chrono::Duration::seconds(75));
+        assert_eq!(stage_line(&s), "done in 1m 15s");
+    }
+
+    #[test]
+    fn details_list_stages_files_and_uploads() {
+        let home = crate::test_support::TestHome::new();
+        let dir = home.0.join("p");
+        std::fs::create_dir_all(dir.join("render")).unwrap();
+        std::fs::write(dir.join("render/final.mp4"), [0u8; 1200]).unwrap();
+        std::fs::write(dir.join("render/credits.txt"), "Sources").unwrap();
+
+        let mut p = crate::test_support::finished_project();
+        p.extra_formats = vec![Format::Square];
+        p.caption_preset = Some(CaptionPreset::Hormozi);
+        p.script.as_mut().unwrap().title = "The fixture title".into();
+        let render = p.render.as_mut().unwrap();
+        render.duration_s = 42.4;
+        render.variants = serde_json::from_value(json!([
+            {"format": "square", "path": "render/final-square.mp4", "width": 1080, "height": 1080}
+        ]))
+        .unwrap();
+        render.subtitles = serde_json::from_value(
+            json!({"srt": "render/captions.srt", "vtt": "render/captions.vtt"}),
+        )
+        .unwrap();
+        p.published = serde_json::from_value(json!([{
+            "platform": "youtube", "format": "vertical", "video_id": "x",
+            "url": "https://youtu.be/x", "privacy": "private",
+            "publish_at": Utc::now(), "uploaded_at": Utc::now()
+        }]))
+        .unwrap();
+        p.stages[1].status = Status::Skipped;
+
+        let text = project_details(&p, &dir);
+        let line = |start: &str| {
+            text.lines()
+                .find(|l| l.trim_start().starts_with(start))
+                .unwrap_or_else(|| panic!("no {start:?} line in:\n{text}"))
+                .to_string()
+        };
+        assert_eq!(text.lines().next().unwrap(), format!("{}  published", p.id));
+        assert_eq!(line("Topic:"), "Topic:   A fixture topic");
+        assert_eq!(line("Title:"), "Title:   The fixture title");
+        assert_eq!(
+            line("Video:"),
+            "Video:   vertical (also square), 15s target, hormozi captions, voice fixture"
+        );
+        assert_eq!(line("Hook"), "  Hook        skipped");
+        assert_eq!(line("Render"), "  Render      done");
+        let main = dir.join("render/final.mp4");
+        assert_eq!(
+            line("Video "),
+            format!("  Video      {}  (0:42, 1080x1920)", main.display())
+        );
+        assert!(line("Square").ends_with("final-square.mp4  (1080x1080)  (missing)"));
+        assert!(line("Captions").ends_with("captions.srt  (missing)"));
+        assert!(text.contains("captions.vtt  (missing)"));
+        assert!(!text.contains("Thumbnail"));
+        assert!(line("Credits").ends_with("credits.txt"));
+        assert!(line("Folder").ends_with("(1.2 KB)"));
+        assert!(
+            line("youtube")
+                .starts_with("  youtube vertical  private  https://youtu.be/x  releases ")
+        );
+
+        // A clip names its source; nothing rendered means no file rows.
+        let clip = crate::test_support::clip_project();
+        let text = project_details(&clip, &dir);
+        assert!(text.contains("Clip of: Long talk by Some Channel, 1:40–2:20\n"));
+        assert!(text.contains("Source:  https://www.youtube.com/watch?v=abc\n"));
+        assert!(!text.contains("Credits") && !text.contains("Published"));
+    }
+
+    #[tokio::test]
+    async fn show_path_needs_a_render() {
+        let home = crate::test_support::TestHome::new();
+        let state = home.state();
+        fixture_projects(&state, &["20261012-091500-3fa9c1"]).await;
+        let err = show(&state, "3fa9c1", true, false).unwrap_err().to_string();
+        assert!(err.contains("has no video yet (not started)"), "{err}");
+        show(&state, "latest", false, false).unwrap();
+        show(&state, "latest", false, true).unwrap();
     }
 
     #[tokio::test]
