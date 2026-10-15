@@ -301,6 +301,7 @@ clipcut batch topics.txt --publish public --start "2026-10-12 15:00" --every 1d
 ```bash
 clipcut list                                  # every project's ID, status, length and topic
 clipcut list -n 5                             # only the newest five
+clipcut show <project-id>                     # one project: stages, files, uploads
 clipcut run <project-id> --from script        # redo script and everything after it
 clipcut run <project-id> --from assets --only # only redo visuals
 clipcut render <project-id>                   # re-render
@@ -323,7 +324,7 @@ ID                      STATUS               LENGTH  TOPIC
 They are also the folder names under `projects/`, and are shown in the
 app's URL (`#/p/<id>`).
 
-`run`, `render`, `publish` and `delete` don't need the whole ID. Give its last few
+`run`, `render`, `publish`, `show` and `delete` don't need the whole ID. Give its last few
 characters (`3fa9c1`), its start (`20261012-0915`), or `latest` for the
 newest project. Any part of at least four characters works as long as only
 one project's ID starts or ends with it; otherwise ClipCut lists the
@@ -333,6 +334,49 @@ matches and asks for more:
 clipcut render 3fa9c1
 clipcut run latest --from voice
 clipcut publish latest --privacy unlisted
+```
+
+`clipcut show` prints what a project is, how long each stage took or why it
+failed, the full path of every file it made (marking any that are missing)
+and its YouTube links:
+
+```
+20261012-091500-3fa9c1  published
+
+Topic:   Why the Moon is drifting away
+Title:   The Moon Is Leaving, 3.8 cm a Year
+Video:   vertical (also square), 40s target, hormozi captions, voice af_heart
+Created: 2026-10-12 09:15
+
+Stages
+  Research    done in 1m 05s
+  Hook        done in 19s
+  Script      done in 43s
+  Beat sheet  done in 1m 32s
+  Visuals     done in 3m 35s
+  Voiceover   done in 30s
+  Render      done in 2m 10s
+
+Files
+  Video      ~/.local/share/clipcut/projects/20261012-091500-3fa9c1/render/final.mp4  (0:42, 1080x1920)
+  Square     ~/.local/share/clipcut/projects/20261012-091500-3fa9c1/render/final-square.mp4  (1080x1080)
+  Captions   ~/.local/share/clipcut/projects/20261012-091500-3fa9c1/render/captions.srt
+             ~/.local/share/clipcut/projects/20261012-091500-3fa9c1/render/captions.vtt
+  Thumbnail  ~/.local/share/clipcut/projects/20261012-091500-3fa9c1/render/thumbnail.jpg
+  Credits    ~/.local/share/clipcut/projects/20261012-091500-3fa9c1/render/credits.txt
+  Folder     ~/.local/share/clipcut/projects/20261012-091500-3fa9c1  (37 MB)
+
+Published
+  youtube vertical  public  https://youtu.be/…  uploaded 2026-10-12 10:02
+```
+
+For scripts, `--path` prints only the video's path (and fails if the
+project has no video yet), and `--json` prints the whole project as saved
+in `project.json`:
+
+```bash
+mpv "$(clipcut show latest --path)"
+clipcut show 3fa9c1 --json | jq -r '.script.title'
 ```
 
 `clipcut delete` shows the projects it matched and how much space they
