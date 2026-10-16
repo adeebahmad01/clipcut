@@ -125,6 +125,15 @@ enum Command {
         #[arg(long)]
         seconds: Option<u32>,
     },
+    /// Show the batch queue, or pause, resume, retry, remove and clear its items.
+    #[command(args_conflicts_with_subcommands = true)]
+    Queue {
+        #[command(subcommand)]
+        action: Option<cli::QueueAction>,
+        /// Print the queue as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Cut the best moments of a long YouTube video into shorts.
     Clip {
         url: String,
@@ -283,6 +292,7 @@ async fn main() -> anyhow::Result<()> {
             };
             cli::batch(state, args).await
         }
+        Command::Queue { action, json } => cli::queue(&state, action, json).await,
         Command::Clip {
             url,
             count,
