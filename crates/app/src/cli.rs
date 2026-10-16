@@ -1,5 +1,5 @@
-//! Command-line batch, clip, publish, ideas, list, show and delete, and finding a
-//! project from part of its ID. When the app is already running on this
+//! Command-line batch, queue, clip, publish, ideas, list, show and delete, and
+//! finding a project from part of its ID. When the app is already running on this
 //! machine they go through its API, so the two never write the same queue or
 //! sign-in at once; otherwise they run here.
 
@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use crate::clips::{self, ClipRequest};
 use crate::publish;
-use crate::queue::{self, AddBody, ItemOptions, ItemStatus, PublishPlan, QueueItem};
+use crate::queue::{self, AddBody, ItemOptions, ItemStatus, PublishPlan, QueueItem, QueueState};
 use crate::state::AppState;
 
 pub fn parse_format(s: &str) -> Result<Format, String> {
@@ -201,7 +201,9 @@ pub async fn batch(state: AppState, args: BatchArgs) -> anyhow::Result<()> {
         )
         .await?;
         let n = added.as_array().map_or(0, Vec::len);
-        println!("Queued {n} topics in the running app; follow them in its Queue tab.");
+        println!(
+            "Queued {n} topics in the running app; follow them in its Queue tab or with `clipcut queue`."
+        );
         return Ok(());
     }
 
@@ -274,7 +276,9 @@ pub async fn clip(state: AppState, args: ClipArgs) -> anyhow::Result<()> {
                 p["topic"].as_str().unwrap_or_default()
             );
         }
-        println!("Queued in the running app; follow them in its Queue tab.");
+        println!(
+            "Queued in the running app; follow them in its Queue tab or with `clipcut queue`."
+        );
         return Ok(());
     }
 
@@ -1007,6 +1011,266 @@ pub async fn delete(state: &AppState, args: DeleteArgs) -> anyhow::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// queue
+
+#[derive(clap::Subcommand, Debug, Clone)]
+pub enum QueueAction {
+    /// Start no new videos; the one being made finishes.
+    Pause,
+    /// Start making videos again.
+    Resume,
+    /// Put a failed or cancelled item back in line: `clipcut queue retry 3`.
+    Retry {
+        /// Its number in `clipcut queue`, or its ID.
+        item: String,
+    },
+    /// Take an item out of the queue; one being made is stopped.
+    Remove {
+        /// Its number in `clipcut queue`, or its ID.
+        item: String,
+    },
+    /// Remove done, failed and cancelled items.
+    Clear,
+}
+
+fn item_status(status: ItemStatus) -> &'static str {
+    match status {
+        ItemStatus::Waiting => "waiting",
+        ItemStatus::Running => "running",
+        ItemStatus::Done => "done",
+        ItemStatus::Failed => "failed",
+        ItemStatus::Cancelled => "cancelled",
+    }
+}
+
+/// `unlisted, 2026-10-13 15:00`, or `-` when the item isn't published.
+fn publish_plan(item: &QueueItem) -> String {
+    match &item.options.publish {
+        None => "-".into(),
+        Some(plan) => match plan.publish_at {
+            Some(at) => format!("{}, {}", plan.privacy, local_time(at)),
+            None => plan.privacy.clone(),
+        },
+    }
+}
+
+/// The `clipcut queue` table: each item's number, status, project, publish
+/// plan and topic, with the video's link or the error below it.
+pub fn queue_table(queue: &QueueState) -> String {
+    let rows: Vec<[String; 5]> = queue
+        .items
+        .iter()
+        .enumerate()
+        .map(|(n, item)| {
+            let project = item.project_id.as_deref().map_or("-".into(), |id| {
+                let skip = id.chars().count().saturating_sub(6);
+                id.chars().skip(skip).collect()
+            });
+            [
+                (n + 1).to_string(),
+                item_status(item.status).into(),
+                project,
+                publish_plan(item),
+                shorten(&item.topic, TOPIC_WIDTH),
+            ]
+        })
+        .collect();
+    let header = ["#", "STATUS", "PROJECT", "PUBLISH", "TOPIC"].map(String::from);
+    let width = |col: usize| {
+        std::iter::once(&header)
+            .chain(&rows)
+            .map(|r| r[col].chars().count())
+            .max()
+            .unwrap_or(0)
+    };
+    let widths = [width(0), width(1), width(2), width(3)];
+    let line = |[n, status, project, publish, topic]: &[String; 5]| {
+        let [n_w, status_w, project_w, publish_w] = widths;
+        format!(
+            "{n:>n_w$}  {status:<status_w$}  {project:<project_w$}  {publish:<publish_w$}  {topic}\n"
+        )
+    };
+    let indent = " ".repeat(widths[0] + 2);
+    let mut out = line(&header);
+    for (row, item) in rows.iter().zip(&queue.items) {
+        out += &line(row);
+        let note = match item.status {
+            ItemStatus::Done => item.video_url.clone(),
+            ItemStatus::Failed | ItemStatus::Cancelled => {
+                item.error.as_deref().map(|e| shorten(e, 100))
+            }
+            _ => None,
+        };
+        if let Some(note) = note {
+            out += &format!("{indent}{note}\n");
+        }
+    }
+    out
+}
+
+/// The item `query` names: its number in the table, its ID, or the start of
+/// its ID.
+fn find_item<'a>(queue: &'a QueueState, query: &str) -> anyhow::Result<(usize, &'a QueueItem)> {
+    let query = query.trim();
+    let numbered = queue.items.iter().enumerate().map(|(n, i)| (n + 1, i));
+    if let Ok(n) = query.parse::<usize>() {
+        let item = n.checked_sub(1).and_then(|i| queue.items.get(i));
+        return item.map(|i| (n, i)).with_context(|| {
+            format!(
+                "the queue has no item {n}; it has {} (`clipcut queue` numbers them)",
+                queue.items.len()
+            )
+        });
+    }
+    if let Some(found) = numbered.clone().find(|(_, i)| i.id == query) {
+        return Ok(found);
+    }
+    anyhow::ensure!(
+        query.chars().count() >= MIN_ID_PART,
+        "no queue item {query:?}; give its number from `clipcut queue` or its ID"
+    );
+    let matches: Vec<_> = numbered.filter(|(_, i)| i.id.starts_with(query)).collect();
+    match matches[..] {
+        [found] => Ok(found),
+        [] => anyhow::bail!("no queue item {query:?}; `clipcut queue` numbers them"),
+        _ => anyhow::bail!(
+            "{query:?} matches {} queue items; give more of the ID",
+            matches.len()
+        ),
+    }
+}
+
+pub async fn queue(
+    state: &AppState,
+    action: Option<QueueAction>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let app = running_app(state).await;
+    let snapshot: QueueState = match &app {
+        Some(base) => {
+            serde_json::from_value(api(reqwest::Method::GET, &format!("{base}/queue"), None).await?)
+                .context("the running app sent a queue this version can't read")?
+        }
+        None => state.queue.snapshot(),
+    };
+    let Some(action) = action else {
+        if json {
+            println!("{}", serde_json::to_string_pretty(&snapshot)?);
+            return Ok(());
+        }
+        if snapshot.items.is_empty() {
+            println!("The queue is empty. Add topics with: clipcut batch topics.txt");
+            return Ok(());
+        }
+        print!("{}", queue_table(&snapshot));
+        let waiting = snapshot
+            .items
+            .iter()
+            .any(|i| i.status == ItemStatus::Waiting);
+        if snapshot.paused {
+            println!("\nPaused: no new video starts until `clipcut queue resume`.");
+        } else if waiting && app.is_none() {
+            println!("\nClipCut isn't running; waiting videos start when you run `clipcut`.");
+        }
+        return Ok(());
+    };
+
+    match action {
+        QueueAction::Pause | QueueAction::Resume => {
+            let paused = matches!(action, QueueAction::Pause);
+            match &app {
+                Some(base) => {
+                    api(
+                        reqwest::Method::PATCH,
+                        &format!("{base}/queue"),
+                        Some(json!({ "paused": paused })),
+                    )
+                    .await?;
+                }
+                None => state.queue.set_paused(paused)?,
+            }
+            let running = snapshot
+                .items
+                .iter()
+                .any(|i| i.status == ItemStatus::Running);
+            println!(
+                "{}",
+                match (paused, running) {
+                    (true, true) => "Paused the queue; the video being made finishes first.",
+                    (true, false) => "Paused the queue.",
+                    (false, _) => "Resumed the queue.",
+                }
+            );
+        }
+        QueueAction::Retry { item } => {
+            let (n, item) = find_item(&snapshot, &item)?;
+            anyhow::ensure!(
+                matches!(item.status, ItemStatus::Failed | ItemStatus::Cancelled),
+                "item {n} is {}; only failed and cancelled items can be retried",
+                item_status(item.status)
+            );
+            match &app {
+                Some(base) => {
+                    api(
+                        reqwest::Method::POST,
+                        &format!("{base}/queue/{}/retry", item.id),
+                        None,
+                    )
+                    .await?;
+                }
+                None => {
+                    state.queue.retry(&item.id)?;
+                }
+            }
+            println!(
+                "Item {n} is back in line: {}",
+                shorten(&item.topic, TOPIC_WIDTH)
+            );
+        }
+        QueueAction::Remove { item } => {
+            let (n, item) = find_item(&snapshot, &item)?;
+            match &app {
+                Some(base) => {
+                    api(
+                        reqwest::Method::DELETE,
+                        &format!("{base}/queue/{}", item.id),
+                        None,
+                    )
+                    .await?;
+                }
+                None => {
+                    queue::remove(state, &item.id).await?;
+                }
+            }
+            let topic = shorten(&item.topic, TOPIC_WIDTH);
+            if item.status == ItemStatus::Running {
+                println!(
+                    "Stopped item {n}: {topic}\nIt stays in the queue as cancelled; \
+                     `clipcut queue retry {n}` picks it up again."
+                );
+            } else {
+                println!("Removed item {n}: {topic}");
+            }
+        }
+        QueueAction::Clear => {
+            let removed = match &app {
+                Some(base) => api(reqwest::Method::POST, &format!("{base}/queue/clear"), None)
+                    .await?["removed"]
+                    .as_u64()
+                    .unwrap_or(0) as usize,
+                None => state.queue.clear_finished()?,
+            };
+            match removed {
+                0 => println!("Nothing to clear: no item is done, failed or cancelled."),
+                1 => println!("Cleared 1 finished item."),
+                n => println!("Cleared {n} finished items."),
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // project ids
 
 /// Shortest start or end of an ID that `resolve_id` matches on.
@@ -1385,6 +1649,31 @@ mod tests {
         );
     }
 
+    /// Point `state`'s CLI at an app on `port`.
+    fn set_port(state: &AppState, port: u16) {
+        let mut config = state.config();
+        config.server.port = port;
+        state.set_config(config).unwrap();
+    }
+
+    /// A port nothing listens on.
+    fn free_port() -> u16 {
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        free.local_addr().unwrap().port()
+    }
+
+    /// Serve the app's API for `app_state` on a free port.
+    async fn serve(app_state: AppState) -> (u16, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        app_state.set_bound_port(port);
+        let app = crate::server::router(app_state);
+        (
+            port,
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() }),
+        )
+    }
+
     #[tokio::test]
     async fn delete_removes_folders_here_or_through_the_running_app() {
         let home = crate::test_support::TestHome::new();
@@ -1395,31 +1684,15 @@ mod tests {
             "20261013-100000-c0ffee",
         ];
         fixture_projects(&state, &ids).await;
-        let set_port = |port: u16| {
-            let mut config = state.config();
-            config.server.port = port;
-            state.set_config(config).unwrap();
-        };
+        let set_port = |port: u16| set_port(&state, port);
         let delete_args = |id: &str| DeleteArgs {
             ids: vec![id.into()],
             yes: true,
             force: false,
         };
-        let serve = async |app_state: AppState| {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let port = listener.local_addr().unwrap().port();
-            app_state.set_bound_port(port);
-            let app = crate::server::router(app_state);
-            (
-                port,
-                tokio::spawn(async move { axum::serve(listener, app).await.unwrap() }),
-            )
-        };
 
         // Nothing listening: the folder is removed here.
-        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        set_port(free.local_addr().unwrap().port());
-        drop(free);
+        set_port(free_port());
         assert!(running_app(&state).await.is_none());
         delete(&state, delete_args("9d21aa")).await.unwrap();
         assert!(!state.store.exists(ids[0]));
@@ -1446,5 +1719,161 @@ mod tests {
         assert!(other.store.exists(ids[2]));
         let leftovers = std::fs::read_dir(other.store.dir(ids[2])).unwrap().count();
         assert_eq!(leftovers, 1, "only project.json is left");
+    }
+
+    /// A queue with one item in each state, as `queue.json` holds it.
+    fn fixture_queue() -> QueueState {
+        let at = "2026-10-12T09:15:00Z";
+        serde_json::from_value(json!({
+            "paused": false,
+            "items": [
+                {"id": "a1b2c3d4e5", "topic": "Why the Moon is drifting away", "status": "done",
+                 "project_id": "20261012-091500-3fa9c1", "added_at": at,
+                 "publish": {"privacy": "public"}, "video_url": "https://youtu.be/moon"},
+                {"id": "b2c3d4e5f6", "topic": "How Australia lost   the Great Emu War",
+                 "status": "failed", "project_id": "20261012-093000-b07e44", "added_at": at,
+                 "error": "Voiceover failed: espeak-ng\nis missing"},
+                {"id": "c3d4e5f6a7", "topic": "The loudest sound ever recorded",
+                 "status": "waiting", "added_at": at,
+                 "publish": {"privacy": "unlisted", "publish_at": "2026-10-13T15:00:00Z"}},
+                {"id": "c3d4e5f6b8", "topic": "Cancelled one", "status": "cancelled",
+                 "project_id": "20261012-094500-9d21aa", "added_at": at, "error": "cancelled"}
+            ]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn queue_table_numbers_items_with_links_and_errors_below() {
+        let queue = fixture_queue();
+        let table = queue_table(&queue);
+        let lines: Vec<&str> = table.lines().collect();
+        let release = local_time("2026-10-13T15:00:00Z".parse().unwrap());
+        let publish_w = format!("unlisted, {release}").len();
+        let row = |n: &str, status: &str, project: &str, publish: &str, topic: &str| {
+            format!("{n}  {status:<9}  {project:<7}  {publish:<publish_w$}  {topic}")
+        };
+        assert_eq!(lines[0], row("#", "STATUS", "PROJECT", "PUBLISH", "TOPIC"));
+        assert_eq!(
+            lines[1],
+            row(
+                "1",
+                "done",
+                "3fa9c1",
+                "public",
+                "Why the Moon is drifting away"
+            )
+        );
+        assert_eq!(lines[2], "   https://youtu.be/moon");
+        assert_eq!(
+            lines[3],
+            row(
+                "2",
+                "failed",
+                "b07e44",
+                "-",
+                "How Australia lost the Great Emu War"
+            )
+        );
+        assert_eq!(lines[4], "   Voiceover failed: espeak-ng is missing");
+        assert_eq!(
+            lines[5],
+            row(
+                "3",
+                "waiting",
+                "-",
+                &format!("unlisted, {release}"),
+                "The loudest sound ever recorded"
+            )
+        );
+        assert_eq!(
+            lines[6],
+            row("4", "cancelled", "9d21aa", "-", "Cancelled one")
+        );
+        assert_eq!(lines[7], "   cancelled");
+        assert_eq!(lines.len(), 8);
+    }
+
+    #[test]
+    fn queue_items_resolve_by_number_or_id() {
+        let queue = fixture_queue();
+        let id = |q: &str| find_item(&queue, q).map(|(n, i)| (n, i.id.as_str()));
+        assert_eq!(id("1").unwrap(), (1, "a1b2c3d4e5"));
+        assert_eq!(id(" 4 ").unwrap(), (4, "c3d4e5f6b8"));
+        assert_eq!(id("b2c3d4e5f6").unwrap(), (2, "b2c3d4e5f6"));
+        assert_eq!(id("b2c3").unwrap(), (2, "b2c3d4e5f6"));
+        for (query, error) in [
+            ("0", "no item 0; it has 4"),
+            ("5", "no item 5; it has 4"),
+            ("c3d4", "matches 2 queue items"),
+            ("ab", "give its number"),
+            ("ffff", "no queue item"),
+        ] {
+            let err = id(query).unwrap_err().to_string();
+            assert!(err.contains(error), "{query}: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn queue_actions_run_here_or_through_the_running_app() {
+        let homes = [(); 2].map(|_| crate::test_support::TestHome::new());
+        let bytes = serde_json::to_vec(&fixture_queue()).unwrap();
+        let [state, other] = homes.each_ref().map(|home| {
+            std::fs::write(home.0.join("queue.json"), &bytes).unwrap();
+            home.state()
+        });
+        let ids = |state: &AppState| {
+            let items = state.queue.snapshot().items;
+            items
+                .iter()
+                .map(|i| format!("{}:{}", &i.id[..4], item_status(i.status)))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let retry = |item: &str| QueueAction::Retry { item: item.into() };
+        let remove = |item: &str| QueueAction::Remove { item: item.into() };
+
+        // Nothing listening: queue.json is changed here.
+        set_port(&state, free_port());
+        queue(&state, None, false).await.unwrap();
+        queue(&state, Some(retry("2")), false).await.unwrap();
+        let err = queue(&state, Some(retry("3")), false).await.unwrap_err();
+        assert!(err.to_string().contains("item 3 is waiting"), "{err}");
+        queue(&state, Some(QueueAction::Pause), false)
+            .await
+            .unwrap();
+        assert!(state.queue.snapshot().paused);
+        queue(&state, Some(remove("c3d4e5f6a7")), false)
+            .await
+            .unwrap();
+        queue(&state, Some(QueueAction::Clear), false)
+            .await
+            .unwrap();
+        assert_eq!(ids(&state), "b2c3:waiting");
+        let saved: QueueState =
+            serde_json::from_slice(&std::fs::read(homes[0].0.join("queue.json")).unwrap()).unwrap();
+        assert_eq!(saved.items.len(), 1);
+        assert!(saved.paused);
+
+        // The app is up: it changes its own queue, not this one.
+        let (port, server) = serve(other.clone()).await;
+        set_port(&state, port);
+        queue(&state, None, true).await.unwrap();
+        queue(&state, Some(retry("4")), false).await.unwrap();
+        queue(&state, Some(remove("1")), false).await.unwrap();
+        queue(&state, Some(QueueAction::Pause), false)
+            .await
+            .unwrap();
+        assert!(other.queue.snapshot().paused);
+        queue(&state, Some(QueueAction::Resume), false)
+            .await
+            .unwrap();
+        queue(&state, Some(QueueAction::Clear), false)
+            .await
+            .unwrap();
+        server.abort();
+        assert_eq!(ids(&other), "c3d4:waiting c3d4:waiting");
+        assert!(!other.queue.snapshot().paused);
+        assert_eq!(ids(&state), "b2c3:waiting");
     }
 }
