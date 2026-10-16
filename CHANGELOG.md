@@ -36,6 +36,10 @@ follow [Semantic Versioning](https://semver.org/).
   what it matched with the space it frees and asks first (`--yes` skips
   that), skips running projects unless you pass `--force`, and goes
   through the app when it is running.
+- `clipcut queue` shows the batch queue (each item's status, project,
+  publish plan and topic, with its video link or error) and can pause,
+  resume, retry, remove and clear items, through the running app or in
+  `queue.json` when it isn't running. `--json` prints the whole queue.
 - `.srt` and `.vtt` caption files and a 1280×720 thumbnail with every
   render.
 - Docs for all of the above in Usage, Configuration, API, Architecture and

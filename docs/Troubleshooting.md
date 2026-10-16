@@ -144,8 +144,8 @@ and connect again.
 
 **"YouTube's daily API quota is used up".**
 The free quota allows about 6 uploads a day and resets at midnight Pacific
-time. Failed queue items can be retried the next day; the video is not
-rendered again.
+time. Failed queue items can be retried the next day (**Retry** on the
+Queue page, or `clipcut queue retry <n>`); the video is not rendered again.
 
 **"the YouTube Data API v3 isn't enabled in your Google Cloud project".**
 Enable it in the

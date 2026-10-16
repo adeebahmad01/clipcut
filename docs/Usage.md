@@ -280,8 +280,35 @@ clipcut ideas --news --q "space"               # news headlines, optionally abou
 ```
 
 If the app is running, `batch` and `clip` add their videos to its queue and
-return right away; follow them on the Queue page. Otherwise they make the
-videos in the terminal and print a `[done]` or `[failed]` line for each.
+return right away; follow them on the Queue page or with `clipcut queue`.
+Otherwise they make the videos in the terminal and print a `[done]` or
+`[failed]` line for each.
+
+`clipcut queue` shows the queue and does what the Queue page's buttons do:
+
+```bash
+clipcut queue                 # every item: status, project, publish plan, topic
+clipcut queue retry 2         # put failed or cancelled item 2 back in line
+clipcut queue remove 3        # take item 3 out; one being made is stopped
+clipcut queue pause           # start no new videos (resume starts them again)
+clipcut queue clear           # remove done, failed and cancelled items
+clipcut queue --json          # the whole queue, for scripts
+```
+
+```
+#  STATUS   PROJECT  PUBLISH                     TOPIC
+1  done     3fa9c1   public                      Why the Moon is drifting away
+   https://youtu.be/…
+2  failed   b07e44   -                           How Australia lost the Great Emu War
+   Voiceover failed: espeak-ng is missing
+3  waiting  -        unlisted, 2026-10-13 15:00  The loudest sound ever recorded
+```
+
+Items are named by their number in that list, or by their ID from
+`--json`. PROJECT is the end of the project's ID, which `show`, `run` and
+`render` accept. With the app running, `clipcut queue` goes through it;
+otherwise it edits `queue.json`, and the app picks up the changes when it
+starts.
 
 Publish to YouTube (see [Publish to YouTube](#publish-to-youtube) for the
 one-time setup):
