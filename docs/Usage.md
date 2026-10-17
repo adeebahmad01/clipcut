@@ -418,6 +418,31 @@ clipcut delete 3fa9c1 b07e44
 clipcut delete latest --yes
 ```
 
+### Shell completions
+
+`clipcut completions <shell>` prints a completion script for bash, zsh,
+fish, elvish or PowerShell. Tab then completes commands and options, and
+the values of `--from`, `--format`, `--also`, `--captions`, `--privacy`,
+`--publish` and `setup`. Save it where your shell looks for completions,
+then open a new terminal:
+
+```bash
+# bash (needs the bash-completion package)
+mkdir -p ~/.local/share/bash-completion/completions
+clipcut completions bash > ~/.local/share/bash-completion/completions/clipcut
+
+# zsh: add `fpath=(~/.zfunc $fpath)` before `compinit` in ~/.zshrc
+mkdir -p ~/.zfunc
+clipcut completions zsh > ~/.zfunc/_clipcut
+
+# fish
+mkdir -p ~/.config/fish/completions
+clipcut completions fish > ~/.config/fish/completions/clipcut.fish
+```
+
+Run the same command again after updating ClipCut so new commands and
+options complete too.
+
 Set `RUST_LOG=debug` for detailed logs.
 
 ## Projects on disk
