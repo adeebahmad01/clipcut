@@ -34,3 +34,4 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 rust-embed = { version = "8", features = ["mime-guess"] }
 mime_guess = "2"
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"

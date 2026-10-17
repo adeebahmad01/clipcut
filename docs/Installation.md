@@ -84,6 +84,10 @@ If `~/.local/bin` is not on your `PATH`, the script says so. Add
 4. Install the [dependencies](#dependencies-by-os), then run
    `clipcut doctor`.
 
+5. Optionally, turn on tab completion for your shell with
+   `clipcut completions bash` (or `zsh`, `fish`); see
+   [Shell completions](Usage.md#shell-completions).
+
 ## Dependencies by OS
 
 | Tool | Required | Used for |
