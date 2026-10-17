@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueHint};
 use clipcut_core::config::Format;
 use clipcut_core::{Paths, Project, Stage, Status};
 use tracing_subscriber::EnvFilter;
@@ -33,7 +33,7 @@ use crate::state::AppState;
 )]
 struct Cli {
     /// Data directory (default: $CLIPCUT_HOME or ~/.local/share/clipcut).
-    #[arg(long, global = true)]
+    #[arg(long, global = true, value_hint = ValueHint::DirPath)]
     home: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
@@ -68,7 +68,7 @@ enum Command {
     Run {
         /// Project ID, its last few characters, or `latest`.
         id: String,
-        #[arg(long, value_parser = parse_stage)]
+        #[arg(long, value_parser = STAGES)]
         from: Option<Stage>,
         #[arg(long)]
         only: bool,
@@ -109,9 +109,10 @@ enum Command {
     },
     /// Make one video per line of a text file (blank and # lines are skipped).
     Batch {
+        #[arg(value_hint = ValueHint::FilePath)]
         file: PathBuf,
         /// Publish each video when it renders: public, unlisted or private.
-        #[arg(long)]
+        #[arg(long, value_parser = cli::PRIVACY)]
         publish: Option<String>,
         /// Space the releases: 90m, 2h, 1d…
         #[arg(long, value_parser = cli::parse_every)]
@@ -136,6 +137,7 @@ enum Command {
     },
     /// Cut the best moments of a long YouTube video into shorts.
     Clip {
+        #[arg(value_hint = ValueHint::Url)]
         url: String,
         /// How many clips (1–5).
         #[arg(long, default_value_t = 3)]
@@ -149,7 +151,7 @@ enum Command {
         #[command(flatten)]
         video: cli::VideoOpts,
         /// Publish each clip when it renders: public, unlisted or private.
-        #[arg(long)]
+        #[arg(long, value_parser = cli::PRIVACY)]
         publish: Option<String>,
         /// Space the releases: 90m, 2h, 1d…
         #[arg(long, value_parser = cli::parse_every)]
@@ -163,19 +165,19 @@ enum Command {
         /// Project ID, its last few characters, or `latest`.
         id: Option<String>,
         /// public, unlisted or private; default: `privacy` under [publish] in config.toml.
-        #[arg(long)]
+        #[arg(long, value_parser = cli::PRIVACY)]
         privacy: Option<String>,
         /// Release time; the video stays private until then.
         #[arg(long, value_parser = cli::parse_time)]
         at: Option<DateTime<Utc>>,
         /// Which render to upload: vertical, horizontal or square.
-        #[arg(long, value_parser = cli::parse_format)]
+        #[arg(long, value_parser = cli::FORMATS)]
         format: Option<Format>,
         /// Sign in to YouTube.
         #[arg(long)]
         connect: bool,
         /// Save the OAuth client JSON downloaded from Google Cloud.
-        #[arg(long, value_name = "client_secret.json")]
+        #[arg(long, value_name = "client_secret.json", value_hint = ValueHint::FilePath)]
         client: Option<PathBuf>,
         /// Forget the YouTube sign-in.
         #[arg(long, conflicts_with_all = ["connect", "id"])]
@@ -199,10 +201,23 @@ enum Command {
     Doctor,
     /// Install free components: yt-dlp, kokoro, searxng or all.
     Setup {
-        #[arg(default_value = "all")]
+        #[arg(default_value = "all", value_parser = SETUP_TARGETS)]
         what: String,
     },
+    /// Print a shell completion script: `clipcut completions bash`.
+    Completions {
+        /// bash, zsh, fish, elvish or powershell.
+        shell: clap_complete::Shell,
+    },
 }
+
+const STAGES: cli::OneOf<Stage> = cli::OneOf::new(
+    &[
+        "research", "hooks", "script", "beats", "assets", "voice", "render",
+    ],
+    parse_stage,
+);
+const SETUP_TARGETS: cli::OneOf<String> = cli::OneOf::hint(&["all", "yt-dlp", "kokoro", "searxng"]);
 
 fn parse_stage(s: &str) -> Result<Stage, String> {
     serde_json::from_value(serde_json::Value::String(s.to_ascii_lowercase()))
@@ -219,6 +234,11 @@ async fn main() -> anyhow::Result<()> {
         .with_target(false)
         .init();
     let cli = Cli::parse();
+    // Completions don't need (or create) the data directory.
+    if let Some(Command::Completions { shell }) = cli.command {
+        print_completions(shell, &mut std::io::stdout());
+        return Ok(());
+    }
     let state = AppState::load(Paths::resolve(cli.home))?;
     match cli.command.unwrap_or(Command::Serve {
         no_window: false,
@@ -369,7 +389,12 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Setup { what } => doctor::setup(&state, &what).await,
+        Command::Completions { .. } => unreachable!("handled before loading state"),
     }
+}
+
+fn print_completions(shell: clap_complete::Shell, out: &mut dyn std::io::Write) {
+    clap_complete::generate(shell, &mut Cli::command(), "clipcut", out);
 }
 
 async fn run_headless(
@@ -464,4 +489,109 @@ async fn serve(
         })
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_definition_is_valid() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn completions_cover_commands_and_values() {
+        for shell in [
+            clap_complete::Shell::Bash,
+            clap_complete::Shell::Zsh,
+            clap_complete::Shell::Fish,
+            clap_complete::Shell::Elvish,
+            clap_complete::Shell::PowerShell,
+        ] {
+            let mut out = Vec::new();
+            print_completions(shell, &mut out);
+            let script = String::from_utf8(out).unwrap();
+            for word in [
+                "render",
+                "queue",
+                "completions",
+                "hormozi",
+                "unlisted",
+                "searxng",
+            ] {
+                assert!(script.contains(word), "{shell} script lacks {word}");
+            }
+        }
+    }
+
+    /// Every listed word parses, and together they name every variant.
+    fn lists_all<T: Clone + Send + Sync + PartialEq + std::fmt::Debug + 'static>(
+        parser: &cli::OneOf<T>,
+        all: &[T],
+    ) {
+        use clap::builder::TypedValueParser;
+        let cmd = clap::Command::new("t");
+        let parsed: Vec<T> = parser
+            .possible_values()
+            .unwrap()
+            .map(|v| {
+                parser
+                    .parse_ref(&cmd, None, std::ffi::OsStr::new(v.get_name()))
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(parsed, all);
+    }
+
+    #[test]
+    fn completion_words_match_the_types() {
+        lists_all(&STAGES, &Stage::ALL);
+        lists_all(&cli::FORMATS, &Format::ALL);
+        lists_all(&cli::CAPTIONS, &clipcut_core::timeline::CaptionPreset::ALL);
+    }
+
+    #[test]
+    fn choice_flags_still_parse_leniently() {
+        let cli = Cli::try_parse_from([
+            "clipcut",
+            "new",
+            "t",
+            "--format",
+            " Square ",
+            "--captions",
+            "HORMOZI",
+            "--also",
+            "vertical,Horizontal",
+        ])
+        .unwrap();
+        let Some(Command::New { video, .. }) = cli.command else {
+            panic!("not new")
+        };
+        assert_eq!(video.format, Some(Format::Square));
+        assert!(video.captions.is_some());
+        assert_eq!(video.also, [Format::Vertical, Format::Horizontal]);
+
+        let cli = Cli::try_parse_from(["clipcut", "run", "latest", "--from", "Assets"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Run {
+                from: Some(Stage::Assets),
+                ..
+            })
+        ));
+        let err = Cli::try_parse_from(["clipcut", "run", "latest", "--from", "nope"])
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("one of research, hooks"), "{err}");
+
+        // Privacy is checked by the command, so its message stays the same.
+        let cli =
+            Cli::try_parse_from(["clipcut", "publish", "latest", "--privacy", "Unlisted"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Publish { privacy: Some(p), .. }) if p == "Unlisted"
+        ));
+    }
 }
