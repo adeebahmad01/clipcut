@@ -40,6 +40,10 @@ follow [Semantic Versioning](https://semver.org/).
   publish plan and topic, with its video link or error) and can pause,
   resume, retry, remove and clear items, through the running app or in
   `queue.json` when it isn't running. `--json` prints the whole queue.
+- `clipcut completions <shell>` prints a tab-completion script for bash,
+  zsh, fish, elvish or PowerShell. It completes commands, options, and the
+  accepted values of `--from`, `--format`, `--captions`, `--privacy`,
+  `--publish` and `setup`, which `--help` now lists too.
 - `.srt` and `.vtt` caption files and a 1280×720 thumbnail with every
   render.
 - Docs for all of the above in Usage, Configuration, API, Architecture and

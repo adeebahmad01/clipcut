@@ -19,6 +19,62 @@ use crate::publish;
 use crate::queue::{self, AddBody, ItemOptions, ItemStatus, PublishPlan, QueueItem, QueueState};
 use crate::state::AppState;
 
+/// A value parser that also lists the accepted words, so `--help` and shell
+/// completions show them. Parsing stays with `parse`, which may be more lenient
+/// (trimming, any case) than the list suggests.
+#[derive(Clone)]
+pub struct OneOf<T> {
+    values: &'static [&'static str],
+    parse: fn(&str) -> Result<T, String>,
+}
+
+impl<T> OneOf<T> {
+    pub const fn new(
+        values: &'static [&'static str],
+        parse: fn(&str) -> Result<T, String>,
+    ) -> Self {
+        Self { values, parse }
+    }
+}
+
+impl OneOf<String> {
+    /// The words for completion only; the command checks the value itself.
+    pub const fn hint(values: &'static [&'static str]) -> Self {
+        Self::new(values, |s| Ok(s.to_string()))
+    }
+}
+
+impl<T: Clone + Send + Sync + 'static> clap::builder::TypedValueParser for OneOf<T> {
+    type Value = T;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<T, clap::Error> {
+        let parse = self.parse;
+        clap::builder::StringValueParser::new()
+            .try_map(move |s| parse(&s))
+            .parse_ref(cmd, arg, value)
+    }
+
+    fn possible_values(
+        &self,
+    ) -> Option<Box<dyn Iterator<Item = clap::builder::PossibleValue> + '_>> {
+        Some(Box::new(
+            self.values.iter().map(clap::builder::PossibleValue::new),
+        ))
+    }
+}
+
+pub const FORMATS: OneOf<Format> = OneOf::new(&["vertical", "horizontal", "square"], parse_format);
+pub const CAPTIONS: OneOf<CaptionPreset> = OneOf::new(
+    &["pop", "hormozi", "mrbeast", "minimal", "karaoke"],
+    parse_captions,
+);
+pub const PRIVACY: OneOf<String> = OneOf::hint(&["public", "unlisted", "private"]);
+
 pub fn parse_format(s: &str) -> Result<Format, String> {
     serde_json::from_value(Value::String(s.trim().to_ascii_lowercase()))
         .map_err(|_| "one of vertical, horizontal, square".to_string())
@@ -36,13 +92,13 @@ pub struct VideoOpts {
     #[arg(long, conflicts_with = "format")]
     pub horizontal: bool,
     /// vertical (9:16), horizontal (16:9) or square (1:1).
-    #[arg(long, value_parser = parse_format)]
+    #[arg(long, value_parser = FORMATS)]
     pub format: Option<Format>,
     /// Caption style: pop, hormozi, mrbeast, minimal or karaoke.
-    #[arg(long, value_parser = parse_captions)]
+    #[arg(long, value_parser = CAPTIONS)]
     pub captions: Option<CaptionPreset>,
     /// Also export these formats from the same edit, e.g. --also horizontal,square.
-    #[arg(long, value_delimiter = ',', value_parser = parse_format)]
+    #[arg(long, value_delimiter = ',', value_parser = FORMATS)]
     pub also: Vec<Format>,
 }
 
