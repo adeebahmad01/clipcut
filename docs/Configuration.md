@@ -10,7 +10,9 @@ ClipCut keeps its settings in `config.toml` inside its data directory:
 `--home PATH` or `$CLIPCUT_HOME` moves the whole data directory.
 
 Most settings can be changed in the app under **Settings**, which writes
-this file. You can also edit it by hand while ClipCut is stopped. Every key
+this file, or from a terminal with `clipcut config set video.fps 60` (see
+[Settings](Usage.md#settings)). You can also edit it by hand while ClipCut
+is stopped. Every key
 is optional: a missing key uses the default shown below. ClipCut checks
 every value on load and names the field if one is out of range.
 

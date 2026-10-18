@@ -197,6 +197,18 @@ enum Command {
         #[arg(long, default_value_t = 15)]
         limit: usize,
     },
+    /// Show or change settings: `clipcut config set video.format horizontal`.
+    #[command(args_conflicts_with_subcommands = true)]
+    Config {
+        #[command(subcommand)]
+        action: Option<cli::ConfigAction>,
+        /// Print only the path of config.toml.
+        #[arg(long, conflicts_with = "json")]
+        path: bool,
+        /// Print the settings as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Check tools, models, search and keys.
     Doctor,
     /// Install free components: yt-dlp, kokoro, searxng or all.
@@ -234,13 +246,25 @@ async fn main() -> anyhow::Result<()> {
         .with_target(false)
         .init();
     let cli = Cli::parse();
-    // Completions don't need (or create) the data directory.
-    if let Some(Command::Completions { shell }) = cli.command {
-        print_completions(shell, &mut std::io::stdout());
-        return Ok(());
-    }
+    let command = match cli.command {
+        // Completions don't need (or create) the data directory.
+        Some(Command::Completions { shell }) => {
+            print_completions(shell, &mut std::io::stdout());
+            return Ok(());
+        }
+        // Config only needs config.toml, which may be the reason the app won't load.
+        Some(Command::Config { action, path, json }) => {
+            let paths = Paths::resolve(cli.home);
+            if path {
+                println!("{}", paths.config_file().display());
+                return Ok(());
+            }
+            return cli::config(&paths, action, json).await;
+        }
+        command => command,
+    };
     let state = AppState::load(Paths::resolve(cli.home))?;
-    match cli.command.unwrap_or(Command::Serve {
+    match command.unwrap_or(Command::Serve {
         no_window: false,
         port: None,
         host: None,
@@ -389,7 +413,9 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Setup { what } => doctor::setup(&state, &what).await,
-        Command::Completions { .. } => unreachable!("handled before loading state"),
+        Command::Completions { .. } | Command::Config { .. } => {
+            unreachable!("handled before loading state")
+        }
     }
 }
 
@@ -516,11 +542,22 @@ mod tests {
                 "render",
                 "queue",
                 "completions",
+                "config",
                 "hormozi",
                 "unlisted",
                 "searxng",
             ] {
                 assert!(script.contains(word), "{shell} script lacks {word}");
+            }
+            // clap_complete only completes positional values in bash and zsh.
+            if matches!(
+                shell,
+                clap_complete::Shell::Bash | clap_complete::Shell::Zsh
+            ) {
+                assert!(
+                    script.contains("video.caption_preset"),
+                    "{shell} lacks settings"
+                );
             }
         }
     }

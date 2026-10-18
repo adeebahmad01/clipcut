@@ -44,6 +44,12 @@ follow [Semantic Versioning](https://semver.org/).
   zsh, fish, elvish or PowerShell. It completes commands, options, and the
   accepted values of `--from`, `--format`, `--captions`, `--privacy`,
   `--publish` and `setup`, which `--help` now lists too.
+- `clipcut config` prints the settings and gets, sets and unsets single
+  ones (`clipcut config set video.format horizontal`), checking each value
+  like the app does. Changes go through the running app, which uses them
+  at once, and it can fix a config.toml that ClipCut won't start with
+  (which the error now points to). `--path` prints where the file is and
+  `--json` prints every setting.
 - `.srt` and `.vtt` caption files and a 1280×720 thumbnail with every
   render.
 - Docs for all of the above in Usage, Configuration, API, Architecture and
