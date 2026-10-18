@@ -418,12 +418,41 @@ clipcut delete 3fa9c1 b07e44
 clipcut delete latest --yes
 ```
 
+### Settings
+
+`clipcut config` changes the settings in
+[config.toml](Configuration.md) without opening the app or editing the
+file. Keys are written `section.setting`, as in the Configuration page:
+
+```bash
+clipcut config                                  # the whole file, with defaults filled in
+clipcut config get video.format                 # one value: vertical
+clipcut config get audio                        # a section, as key = value lines
+clipcut config set video.format horizontal
+clipcut config set video.captions off           # true/false, yes/no, on/off or 1/0
+clipcut config set youtube.channel_blocklist "Channel A, Channel B"
+clipcut config set tools.ffmpeg /opt/ffmpeg/bin/ffmpeg
+clipcut config set youtube.cookies_from_browser ""   # an empty value clears an optional setting
+clipcut config unset video.format               # back to the default (a section works too)
+clipcut config --path                           # where config.toml is
+clipcut config --json                           # every setting as JSON, for scripts
+```
+
+`set` checks the value the same way the app does and names the setting if
+it is out of range, so the file is never left half-valid. When the app is
+running, the change goes through it and it uses the new value straight
+away, except `server.*` settings, which take effect when you restart it.
+`clipcut config` also works when a hand edit left config.toml with a value
+ClipCut won't start with: it shows the file and points to the bad setting,
+and `set` or `unset` fixes it.
+
 ### Shell completions
 
 `clipcut completions <shell>` prints a completion script for bash, zsh,
 fish, elvish or PowerShell. Tab then completes commands and options, and
 the values of `--from`, `--format`, `--also`, `--captions`, `--privacy`,
-`--publish` and `setup`. Save it where your shell looks for completions,
+`--publish` and `setup`. In bash and zsh it also completes setting names
+after `clipcut config get`, `set` and `unset`. Save it where your shell looks for completions,
 then open a new terminal:
 
 ```bash

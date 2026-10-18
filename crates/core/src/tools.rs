@@ -69,6 +69,10 @@ pub fn install_hint(package: &str) -> String {
     }
 }
 
+/// The programs `[tools]` in config.toml can point at, as `detect` names them.
+pub const TOOL_NAMES: [&str; 11] =
+    ["ffmpeg", "ffprobe", "yt-dlp", "chromium", "claude", "codex", "espeak-ng", "podman", "docker", "deno", "node"];
+
 impl Tools {
     pub fn detect(config: &Config, paths: &Paths) -> Self {
         let o = &config.tools;
