@@ -323,18 +323,29 @@ impl Config {
     }
 
     pub fn load(path: &Path) -> anyhow::Result<Self> {
-        let config: Self = match std::fs::read_to_string(path) {
-            Ok(text) => toml::from_str(&text)?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
-            Err(e) => return Err(e.into()),
-        };
+        let config = Self::read(path)?;
         config.validate()?;
         Ok(config)
     }
 
+    /// Read `path`, or the defaults when it doesn't exist, without checking the
+    /// values, so `clipcut config` can still show and fix one that is out of range.
+    pub fn read(path: &Path) -> anyhow::Result<Self> {
+        match std::fs::read_to_string(path) {
+            Ok(text) => Ok(toml::from_str(&text)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         self.validate()?;
-        crate::model::write_atomic(path, toml::to_string_pretty(self)?.as_bytes())
+        crate::model::write_atomic(path, self.to_toml()?.as_bytes())
+    }
+
+    /// The settings as config.toml holds them.
+    pub fn to_toml(&self) -> anyhow::Result<String> {
+        Ok(toml::to_string_pretty(self)?)
     }
 }
 

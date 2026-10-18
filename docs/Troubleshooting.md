@@ -167,6 +167,12 @@ network, and that your firewall allows the port (default 7878). On Fedora:
 Another program (or another ClipCut) uses the port. Start with
 `clipcut --port 7879`.
 
+**"could not load …/config.toml".**
+A setting in [config.toml](Configuration.md) is out of range or has a typo,
+usually after a hand edit; the line below names it. Fix it with
+`clipcut config set <setting> <value>`, or put it back to its default
+with `clipcut config unset <setting>`. `clipcut config` shows the whole file.
+
 ## Still stuck?
 
 [Open an issue](https://github.com/adeebahmad01/clipcut/issues/new/choose)

@@ -1,5 +1,5 @@
-//! Command-line batch, queue, clip, publish, ideas, list, show and delete, and
-//! finding a project from part of its ID. When the app is already running on this
+//! Command-line batch, queue, clip, publish, ideas, list, show, delete and
+//! config, and finding a project from part of its ID. When the app is already running on this
 //! machine they go through its API, so the two never write the same queue or
 //! sign-in at once; otherwise they run here.
 
@@ -10,7 +10,8 @@ use anyhow::Context;
 use chrono::{DateTime, Local, NaiveDateTime, Utc};
 use clipcut_core::config::Format;
 use clipcut_core::timeline::CaptionPreset;
-use clipcut_core::{Project, StageState, Status};
+use clipcut_core::tools::TOOL_NAMES;
+use clipcut_core::{Config, Paths, Project, StageState, Status};
 use clipcut_sources::IdeaSource;
 use serde_json::{Value, json};
 
@@ -162,7 +163,10 @@ fn privacy_plan(
 
 /// The API of the app running on this machine, if any.
 async fn running_app(state: &AppState) -> Option<String> {
-    let port = state.config().server.port;
+    app_on(state.config().server.port).await
+}
+
+async fn app_on(port: u16) -> Option<String> {
     let base = format!("http://127.0.0.1:{port}/api");
     let resp = reqwest::Client::new()
         .get(format!("{base}/queue"))
@@ -1327,6 +1331,337 @@ pub async fn queue(
 }
 
 // ---------------------------------------------------------------------------
+// config
+
+/// Every section and setting in config.toml, for completion; a test checks
+/// it against `Config`.
+pub const CONFIG_KEYS: OneOf<String> = OneOf::hint(&[
+    "server",
+    "server.host",
+    "server.port",
+    "server.open_window",
+    "llm",
+    "llm.provider",
+    "llm.model",
+    "llm.fast_model",
+    "llm.timeout_seconds",
+    "llm.unslop_preset",
+    "llm.skip_unslop",
+    "video",
+    "video.format",
+    "video.fps",
+    "video.target_seconds",
+    "video.min_clip_seconds",
+    "video.max_clip_seconds",
+    "video.captions",
+    "video.caption_preset",
+    "video.crf",
+    "search",
+    "search.searxng_url",
+    "search.manage_searxng",
+    "search.duckduckgo_fallback",
+    "youtube",
+    "youtube.max_results",
+    "youtube.max_video_minutes",
+    "youtube.cookies_from_browser",
+    "youtube.channel_blocklist",
+    "tts",
+    "tts.engine",
+    "tts.voice",
+    "tts.speed",
+    "tts.command",
+    "audio",
+    "audio.voice_volume",
+    "audio.sfx_volume",
+    "audio.music_volume",
+    "audio.duck_music",
+    "audio.use_music",
+    "publish",
+    "publish.privacy",
+    "publish.category_id",
+    "publish.made_for_kids",
+    "tools",
+    "tools.ffmpeg",
+    "tools.ffprobe",
+    "tools.yt-dlp",
+    "tools.chromium",
+    "tools.claude",
+    "tools.codex",
+    "tools.espeak-ng",
+    "tools.podman",
+    "tools.docker",
+    "tools.deno",
+    "tools.node",
+]);
+
+#[derive(clap::Subcommand, Debug, Clone)]
+pub enum ConfigAction {
+    /// Print a setting, or every setting in a section: `clipcut config get video.fps`.
+    Get {
+        /// A setting such as video.format, or a section such as video.
+        #[arg(value_parser = CONFIG_KEYS, hide_possible_values = true)]
+        key: String,
+    },
+    /// Change a setting: `clipcut config set video.format horizontal`.
+    Set {
+        /// A setting such as video.format.
+        #[arg(value_parser = CONFIG_KEYS, hide_possible_values = true)]
+        key: String,
+        /// The new value. Lists take commas; an empty value clears an optional setting.
+        #[arg(allow_hyphen_values = true)]
+        value: String,
+    },
+    /// Put a setting, or every setting in a section, back to its default.
+    Unset {
+        /// A setting such as video.format, or a section such as video.
+        #[arg(value_parser = CONFIG_KEYS, hide_possible_values = true)]
+        key: String,
+    },
+}
+
+/// The settings as JSON, with each decimal as config.toml writes it (0.55
+/// rather than the f32's 0.550000011920929).
+fn config_value(config: &Config) -> Value {
+    let text = serde_json::to_string(config).expect("settings serialize");
+    serde_json::from_str(&text).expect("settings read back")
+}
+
+fn key_names(settings: &serde_json::Map<String, Value>) -> String {
+    let names: Vec<&str> = settings.keys().map(String::as_str).collect();
+    names.join(", ")
+}
+
+/// `key` split into its section and setting, once both are known to exist.
+/// Any program in `TOOL_NAMES` is a setting of `tools`, set or not.
+fn split_key<'a>(root: &Value, key: &'a str) -> anyhow::Result<(&'a str, Option<&'a str>)> {
+    let key = key.trim();
+    let (section, name) = match key.split_once('.') {
+        Some((section, name)) => (section, Some(name)),
+        None => (key, None),
+    };
+    let sections = root.as_object().expect("settings are a table");
+    let Some(Value::Object(settings)) = sections.get(section) else {
+        anyhow::bail!(
+            "config.toml has no section {section:?}; the sections are {}",
+            key_names(sections)
+        );
+    };
+    match name {
+        Some(name) if section == "tools" => anyhow::ensure!(
+            TOOL_NAMES.contains(&name),
+            "ClipCut runs no program called {name:?}; [tools] takes {}",
+            TOOL_NAMES.join(", ")
+        ),
+        Some(name) => anyhow::ensure!(
+            settings.contains_key(name),
+            "config.toml has no setting {key:?}; [{section}] has {}",
+            key_names(settings)
+        ),
+        None => {}
+    }
+    Ok((section, name))
+}
+
+/// `video.format = "vertical"`, the way config.toml spells it, or a comment
+/// for an optional setting that isn't set.
+fn setting_line(key: &str, value: &Value) -> String {
+    match value {
+        Value::Null => format!("# {key} is not set\n"),
+        value => format!("{key} = {value}\n"),
+    }
+}
+
+fn section_lines(section: &str, settings: &Value) -> String {
+    let settings = settings.as_object().expect("sections are tables");
+    settings
+        .iter()
+        .map(|(name, value)| setting_line(&format!("{section}.{name}"), value))
+        .collect()
+}
+
+/// What `clipcut config get` prints: a setting's bare value (one line per
+/// list item, nothing when unset), or a section as `key = value` lines.
+pub fn config_get(config: &Config, key: &str) -> anyhow::Result<String> {
+    let root = config_value(config);
+    let (section, name) = split_key(&root, key)?;
+    let Some(name) = name else {
+        return Ok(section_lines(section, &root[section]));
+    };
+    Ok(match &root[section][name] {
+        Value::Null => String::new(),
+        Value::String(text) => format!("{text}\n"),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::String(text) => format!("{text}\n"),
+                other => format!("{other}\n"),
+            })
+            .collect(),
+        other => format!("{other}\n"),
+    })
+}
+
+/// `raw` read as the same kind of value `current` is.
+fn parse_setting(key: &str, current: &Value, raw: &str) -> anyhow::Result<Value> {
+    let text = raw.trim();
+    Ok(match current {
+        Value::Bool(_) => Value::Bool(match text.to_ascii_lowercase().as_str() {
+            "true" | "yes" | "on" | "1" => true,
+            "false" | "no" | "off" | "0" => false,
+            _ => anyhow::bail!("{key} is true or false, not {raw:?}"),
+        }),
+        Value::Number(n) if n.is_f64() => text
+            .parse::<f64>()
+            .ok()
+            .filter(|x| x.is_finite())
+            .map(Value::from)
+            .with_context(|| format!("{key} takes a number, not {raw:?}"))?,
+        Value::Number(_) => text
+            .parse::<u64>()
+            .map(Value::from)
+            .with_context(|| format!("{key} takes a whole number, not {raw:?}"))?,
+        Value::Array(_) => text
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(Value::from)
+            .collect(),
+        Value::String(_) | Value::Null => Value::from(text),
+        Value::Object(_) => anyhow::bail!("{key} is a section; set one of its settings"),
+    })
+}
+
+/// Settings from edited JSON, checked the way the app checks them.
+fn config_from_value(root: Value, key: &str) -> anyhow::Result<Config> {
+    let config: Config = serde_json::from_value(root).map_err(|e| anyhow::anyhow!("{key}: {e}"))?;
+    config.validate()?;
+    Ok(config)
+}
+
+/// `config` with `key` set to `raw`, read as the kind of value the setting holds.
+pub fn config_set(config: &Config, key: &str, raw: &str) -> anyhow::Result<Config> {
+    let mut root = config_value(config);
+    let (section, name) = split_key(&root, key)?;
+    let settings = root[section].as_object_mut().expect("sections are tables");
+    let Some(name) = name else {
+        anyhow::bail!(
+            "{section} is a section; set one of its settings: {}",
+            key_names(settings)
+        );
+    };
+    // Settings that are unset by default (a tool path, the cookies browser)
+    // go back to unset when given an empty value.
+    let defaults = config_value(&Config::default());
+    let optional = defaults[section].get(name).is_none_or(Value::is_null);
+    if optional && raw.trim().is_empty() {
+        if section == "tools" {
+            settings.remove(name);
+        } else {
+            settings.insert(name.to_string(), Value::Null);
+        }
+    } else {
+        let current = settings.get(name).cloned().unwrap_or_default();
+        settings.insert(name.to_string(), parse_setting(key, &current, raw)?);
+    }
+    config_from_value(root, key)
+}
+
+/// `config` with `key`, or every setting in a section, back to its default.
+pub fn config_unset(config: &Config, key: &str) -> anyhow::Result<Config> {
+    let mut root = config_value(config);
+    let defaults = config_value(&Config::default());
+    let (section, name) = split_key(&root, key)?;
+    match name {
+        None => root[section] = defaults[section].clone(),
+        Some(name) if section == "tools" => {
+            root[section]
+                .as_object_mut()
+                .expect("tools is a table")
+                .remove(name);
+        }
+        Some(name) => root[section][name] = defaults[section][name].clone(),
+    }
+    config_from_value(root, key)
+}
+
+/// `clipcut config`: print config.toml, or get, set or unset one setting.
+/// Changes go through the running app when there is one, so it starts using
+/// them at once; otherwise they are written to the file here. It doesn't need
+/// the rest of the app, so it can fix a file the app refuses to load.
+pub async fn config(paths: &Paths, action: Option<ConfigAction>, json: bool) -> anyhow::Result<()> {
+    let file = paths.config_file();
+    let on_disk =
+        Config::read(&file).with_context(|| format!("could not read {}", file.display()))?;
+    let app = app_on(on_disk.server.port).await;
+    let current: Config = match &app {
+        Some(base) => serde_json::from_value(
+            api(reqwest::Method::GET, &format!("{base}/config"), None).await?,
+        )
+        .context("the running app sent settings this version can't read")?,
+        None => on_disk,
+    };
+    let (key, changed) = match action {
+        None => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&current)?);
+            } else {
+                println!("# {}", file.display());
+                print!("{}", current.to_toml()?);
+            }
+            if let Err(e) = current.validate() {
+                eprintln!(
+                    "\nClipCut won't start with this file: {e:#}\n\
+                     Fix it with `clipcut config set` or `clipcut config unset`."
+                );
+            }
+            return Ok(());
+        }
+        Some(ConfigAction::Get { key }) => {
+            print!("{}", config_get(&current, &key)?);
+            return Ok(());
+        }
+        Some(ConfigAction::Set { key, value }) => {
+            let changed = config_set(&current, &key, &value)?;
+            (key, changed)
+        }
+        Some(ConfigAction::Unset { key }) => {
+            let changed = config_unset(&current, &key)?;
+            (key, changed)
+        }
+    };
+
+    let after = config_value(&changed);
+    let (section, name) = split_key(&after, &key)?;
+    let shown = match name {
+        Some(name) => setting_line(&format!("{section}.{name}"), &after[section][name]),
+        None => format!(
+            "[{section}] is back to its defaults:\n{}",
+            section_lines(section, &after[section])
+        ),
+    };
+    if config_value(&current) == after {
+        print!("Already set: {shown}");
+        return Ok(());
+    }
+    match &app {
+        Some(base) => {
+            let body = serde_json::to_value(&changed)?;
+            api(reqwest::Method::PUT, &format!("{base}/config"), Some(body)).await?;
+        }
+        None => changed
+            .save(&file)
+            .with_context(|| format!("could not write {}", file.display()))?,
+    }
+    print!("{shown}");
+    match (&app, section) {
+        (Some(_), "server") => println!("The running app keeps its address until you restart it."),
+        (Some(_), _) => println!("The running app uses it from now on."),
+        (None, _) => {}
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // project ids
 
 /// Shortest start or end of an ID that `resolve_id` matches on.
@@ -1931,5 +2266,189 @@ mod tests {
         assert_eq!(ids(&other), "c3d4:waiting c3d4:waiting");
         assert!(!other.queue.snapshot().paused);
         assert_eq!(ids(&state), "b2c3:waiting");
+    }
+
+    #[test]
+    fn config_keys_name_every_section_and_setting() {
+        let root = config_value(&Config::default());
+        let mut expected = Vec::new();
+        for (section, settings) in root.as_object().unwrap() {
+            expected.push(section.clone());
+            for name in settings.as_object().unwrap().keys() {
+                expected.push(format!("{section}.{name}"));
+            }
+        }
+        expected.extend(TOOL_NAMES.iter().map(|name| format!("tools.{name}")));
+        expected.sort();
+        let mut listed: Vec<String> = CONFIG_KEYS.values.iter().map(|k| k.to_string()).collect();
+        listed.sort();
+        assert_eq!(listed, expected);
+    }
+
+    #[test]
+    fn config_get_prints_bare_values_and_sections() {
+        let mut config = Config::default();
+        config.youtube.channel_blocklist = vec!["One".into(), "Two".into()];
+        let get = |key: &str| config_get(&config, key).unwrap();
+        assert_eq!(get("video.format"), "vertical\n");
+        assert_eq!(get(" video.fps "), "30\n");
+        assert_eq!(get("tts.speed"), "1.1\n");
+        assert_eq!(get("audio.sfx_volume"), "0.55\n");
+        assert_eq!(get("video.captions"), "true\n");
+        assert_eq!(get("youtube.channel_blocklist"), "One\nTwo\n");
+        assert_eq!(get("youtube.cookies_from_browser"), "");
+        assert_eq!(get("tools.ffmpeg"), "");
+        assert_eq!(get("tools"), "");
+        assert_eq!(
+            get("publish"),
+            "publish.category_id = \"22\"\npublish.made_for_kids = false\npublish.privacy = \"private\"\n"
+        );
+        assert!(get("youtube").contains("# youtube.cookies_from_browser is not set\n"));
+
+        let err = |key: &str| config_get(&config, key).unwrap_err().to_string();
+        assert!(
+            err("vidoe.fps").contains("the sections are audio, llm"),
+            "{}",
+            err("vidoe.fps")
+        );
+        assert!(
+            err("video.fsp").contains("[video] has caption_preset"),
+            "{}",
+            err("video.fsp")
+        );
+        assert!(err("video.fps.max").contains("no setting \"video.fps.max\""));
+        assert!(err("tools.vlc").contains("[tools] takes ffmpeg"));
+    }
+
+    #[test]
+    fn config_set_reads_each_kind_of_value_and_checks_it() {
+        let set = |config: &Config, key: &str, value: &str| config_set(config, key, value);
+        let config = Config::default();
+
+        let c = set(&config, "video.format", "horizontal").unwrap();
+        assert_eq!(c.video.format, Format::Horizontal);
+        let c = set(&c, "video.captions", "Off").unwrap();
+        assert!(!c.video.captions);
+        let c = set(&c, "tts.speed", " 1.25 ").unwrap();
+        assert_eq!(c.tts.speed, 1.25);
+        let c = set(&c, "video.crf", "18").unwrap();
+        assert_eq!(c.video.crf, 18);
+        let c = set(&c, "youtube.channel_blocklist", "Claimer A, Claimer B,,").unwrap();
+        assert_eq!(c.youtube.channel_blocklist, ["Claimer A", "Claimer B"]);
+        let c = set(&c, "youtube.cookies_from_browser", "firefox").unwrap();
+        assert_eq!(c.youtube.cookies_from_browser.as_deref(), Some("firefox"));
+        let c = set(&c, "youtube.cookies_from_browser", "").unwrap();
+        assert_eq!(c.youtube.cookies_from_browser, None);
+        let c = set(&c, "tools.ffmpeg", "/opt/ffmpeg/bin/ffmpeg").unwrap();
+        assert_eq!(c.tools["ffmpeg"], "/opt/ffmpeg/bin/ffmpeg");
+        assert_eq!(
+            config_get(&c, "tools").unwrap(),
+            "tools.ffmpeg = \"/opt/ffmpeg/bin/ffmpeg\"\n"
+        );
+        let c = set(&c, "tools.ffmpeg", "").unwrap();
+        assert!(c.tools.is_empty());
+        // The other settings came through untouched.
+        assert_eq!(c.video.format, Format::Horizontal);
+        assert_eq!(c.audio.sfx_volume, 0.55);
+
+        let err = |key: &str, value: &str| set(&config, key, value).unwrap_err().to_string();
+        assert!(err("video.captions", "maybe").contains("true or false"));
+        assert!(err("video.fps", "fast").contains("whole number"));
+        assert!(err("video.fps", "29.97").contains("whole number"));
+        assert!(err("tts.speed", "NaN").contains("takes a number"));
+        assert!(err("video.fps", "0").contains("video.fps must be between 1 and 60"));
+        assert!(err("server.port", "70000").contains("server.port"));
+        assert!(err("video.format", "diagonal").contains("unknown variant"));
+        assert!(err("publish.privacy", "friends").contains("publish.privacy must be"));
+        assert!(
+            err("video", "x")
+                .contains("video is a section; set one of its settings: caption_preset")
+        );
+        assert!(err("tools.vlc", "/usr/bin/vlc").contains("no program called \"vlc\""));
+    }
+
+    #[test]
+    fn config_unset_restores_defaults() {
+        let mut config = Config::default();
+        config.video.format = Format::Square;
+        config.video.fps = 24;
+        config.tts.voice = "bf_emma".into();
+        config.tools.insert("ffmpeg".into(), "/opt/ffmpeg".into());
+        config.tools.insert("node".into(), "/opt/node".into());
+
+        let c = config_unset(&config, "video.fps").unwrap();
+        assert_eq!((c.video.fps, c.video.format), (30, Format::Square));
+        let c = config_unset(&c, "video").unwrap();
+        assert_eq!(c.video.format, Format::Vertical);
+        assert_eq!(c.tts.voice, "bf_emma");
+        let c = config_unset(&c, "tools.ffmpeg").unwrap();
+        assert_eq!(c.tools.keys().collect::<Vec<_>>(), ["node"]);
+        let c = config_unset(&c, "tools").unwrap();
+        assert!(c.tools.is_empty());
+        assert!(config_unset(&c, "video.fsp").is_err());
+    }
+
+    #[tokio::test]
+    async fn config_changes_the_file_here_or_through_the_running_app() {
+        let home = crate::test_support::TestHome::new();
+        let paths = Paths {
+            home: home.0.clone(),
+        };
+        let file = paths.config_file();
+        let set = |key: &str, value: &str| {
+            Some(ConfigAction::Set {
+                key: key.into(),
+                value: value.into(),
+            })
+        };
+
+        // A value the app won't start with can still be shown and fixed.
+        let port = free_port();
+        std::fs::write(
+            &file,
+            format!("[server]\nport = {port}\n\n[video]\nfps = 0\n"),
+        )
+        .unwrap();
+        config(&paths, None, false).await.unwrap();
+        config(&paths, set("video.fps", "24"), false).await.unwrap();
+        let saved = Config::load(&file).unwrap();
+        assert_eq!((saved.video.fps, saved.server.port), (24, port));
+        assert!(config(&paths, set("video.fps", "61"), false).await.is_err());
+        assert_eq!(Config::load(&file).unwrap().video.fps, 24);
+        config(
+            &paths,
+            Some(ConfigAction::Unset {
+                key: "video.fps".into(),
+            }),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(Config::load(&file).unwrap().video.fps, 30);
+
+        // The app is up on this home: it takes the change and uses it at once.
+        let state = home.state();
+        let (port, server) = serve(state.clone()).await;
+        set_port(&state, port);
+        config(&paths, set("video.format", "square"), false)
+            .await
+            .unwrap();
+        config(
+            &paths,
+            Some(ConfigAction::Get {
+                key: "video".into(),
+            }),
+            false,
+        )
+        .await
+        .unwrap();
+        let err = config(&paths, set("audio.music_volume", "3"), false)
+            .await
+            .unwrap_err();
+        server.abort();
+        assert!(err.to_string().contains("audio.music_volume"), "{err}");
+        assert_eq!(state.config().video.format, Format::Square);
+        assert_eq!(Config::load(&file).unwrap().video.format, Format::Square);
+        assert_eq!(state.config().audio.music_volume, 0.14);
     }
 }

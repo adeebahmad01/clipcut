@@ -3,6 +3,7 @@
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
+use anyhow::Context;
 use clipcut_core::{Config, KeyPool, Paths, Progress, ProgressEvent, Tools};
 use clipcut_llm::Llm;
 use clipcut_render::Renderer;
@@ -80,8 +81,12 @@ impl std::ops::Deref for AppState {
 impl AppState {
     pub fn load(paths: Paths) -> anyhow::Result<Self> {
         paths.ensure()?;
-        let config = Config::load(&paths.config_file())?;
-        config.validate()?;
+        let config = Config::load(&paths.config_file()).with_context(|| {
+            format!(
+                "could not load {}; `clipcut config` shows it and `clipcut config set` fixes a setting",
+                paths.config_file().display()
+            )
+        })?;
         if !paths.config_file().exists() {
             config.save(&paths.config_file())?;
         }
