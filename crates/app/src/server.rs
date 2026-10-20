@@ -619,6 +619,36 @@ pub(crate) fn clean_extra_formats(main: Format, extra: Vec<Format>) -> Vec<Forma
     out
 }
 
+/// Changes the format, extra formats and caption style, clearing the render
+/// if any of them changed. `Some(None)` captions go back to the configured default.
+pub(crate) fn set_video(
+    p: &mut Project,
+    format: Option<Format>,
+    extra_formats: Option<Vec<Format>>,
+    caption_preset: Option<Option<CaptionPreset>>,
+) {
+    if let Some(v) = format
+        && p.format != v
+    {
+        pipeline::reset_from(p, Stage::Render);
+        p.format = v;
+        p.extra_formats = clean_extra_formats(v, std::mem::take(&mut p.extra_formats));
+    }
+    if let Some(v) = extra_formats {
+        let v = clean_extra_formats(p.format, v);
+        if p.extra_formats != v {
+            pipeline::reset_from(p, Stage::Render);
+            p.extra_formats = v;
+        }
+    }
+    if let Some(v) = caption_preset
+        && p.caption_preset != v
+    {
+        pipeline::reset_from(p, Stage::Render);
+        p.caption_preset = v;
+    }
+}
+
 async fn create_project(
     State(state): State<AppState>,
     Json(body): Json<CreateBody>,
@@ -762,26 +792,7 @@ async fn patch_project(
             if let Some(v) = body.autopilot {
                 p.autopilot = v;
             }
-            if let Some(v) = body.format {
-                if p.format != v {
-                    pipeline::reset_from(p, Stage::Render);
-                    p.format = v;
-                    p.extra_formats = clean_extra_formats(v, std::mem::take(&mut p.extra_formats));
-                }
-            }
-            if let Some(v) = body.extra_formats {
-                let v = clean_extra_formats(p.format, v);
-                if p.extra_formats != v {
-                    pipeline::reset_from(p, Stage::Render);
-                    p.extra_formats = v;
-                }
-            }
-            if let Some(v) = body.caption_preset
-                && p.caption_preset != v
-            {
-                pipeline::reset_from(p, Stage::Render);
-                p.caption_preset = v;
-            }
+            set_video(p, body.format, body.extra_formats, body.caption_preset);
             if let Some(v) = body.target_seconds {
                 anyhow::ensure!(
                     p.kind == ProjectKind::Story || p.target_seconds == v,
@@ -2595,7 +2606,12 @@ mod tests {
         assert_eq!(
             clean_extra_formats(
                 Format::Vertical,
-                vec![Format::Vertical, Format::Square, Format::Square, Format::Horizontal],
+                vec![
+                    Format::Vertical,
+                    Format::Square,
+                    Format::Square,
+                    Format::Horizontal
+                ],
             ),
             [Format::Square, Format::Horizontal]
         );
