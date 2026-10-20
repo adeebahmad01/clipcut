@@ -1,7 +1,8 @@
-//! Command-line batch, queue, clip, publish, ideas, list, show, delete and
-//! config, and finding a project from part of its ID. When the app is already running on this
-//! machine they go through its API, so the two never write the same queue or
-//! sign-in at once; otherwise they run here.
+//! Command-line batch, queue, clip, publish, ideas, list, show, delete,
+//! render settings and config, and finding a project from part of its ID.
+//! When the app is already running on this machine they go through its API,
+//! so the two never write the same queue or sign-in at once; otherwise they
+//! run here.
 
 use std::path::Path;
 use std::time::Duration;
@@ -86,7 +87,7 @@ pub fn parse_captions(s: &str) -> Result<CaptionPreset, String> {
         .map_err(|_| "one of pop, hormozi, mrbeast, minimal, karaoke".to_string())
 }
 
-/// Shape and caption options shared by `new`, `batch` and `clip`.
+/// Shape and caption options shared by `new`, `render`, `batch` and `clip`.
 #[derive(clap::Args, Debug, Default)]
 pub struct VideoOpts {
     /// Shortcut for --format horizontal.
@@ -784,6 +785,16 @@ fn local_time(t: DateTime<Utc>) -> String {
     t.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string()
 }
 
+/// `vertical (also horizontal, square)`.
+fn formats(p: &Project) -> String {
+    let mut out = p.format.slug().to_string();
+    if !p.extra_formats.is_empty() {
+        let also: Vec<&str> = p.extra_formats.iter().map(|f| f.slug()).collect();
+        out += &format!(" (also {})", also.join(", "));
+    }
+    out
+}
+
 /// The `clipcut show` report: what the project is, how each stage went, the
 /// files it made (flagging any that are gone) and where it was published.
 pub fn project_details(p: &Project, dir: &Path) -> String {
@@ -809,11 +820,7 @@ pub fn project_details(p: &Project, dir: &Path) -> String {
         ));
         about.push(("Source", clip.url.clone()));
     }
-    let mut video = p.format.slug().to_string();
-    if !p.extra_formats.is_empty() {
-        let also: Vec<&str> = p.extra_formats.iter().map(|f| f.slug()).collect();
-        video += &format!(" (also {})", also.join(", "));
-    }
+    let mut video = formats(p);
     video += &format!(", {}s target", p.target_seconds);
     if let Some(preset) = p.caption_preset {
         video += &format!(", {} captions", preset.slug());
@@ -997,7 +1004,7 @@ pub fn projects_to_delete(
 /// not delete its copy instead.
 async fn app_serves_folder(base: &str, id: &str, dir: &Path) -> bool {
     let token = uuid::Uuid::new_v4().to_string();
-    let name = format!(".delete-check-{token}");
+    let name = format!(".app-check-{token}");
     let marker = dir.join(&name);
     if std::fs::write(&marker, &token).is_err() {
         return false;
@@ -1067,6 +1074,88 @@ pub async fn delete(state: &AppState, args: DeleteArgs) -> anyhow::Result<()> {
     let n = projects.len();
     let noun = if n == 1 { "project" } else { "projects" };
     println!("Deleted {n} {noun}, freeing {}.", human_size(size));
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// render
+
+/// The video settings `clipcut render` changes before rendering again.
+#[derive(Debug, Default, PartialEq)]
+pub struct VideoChanges {
+    pub format: Option<Format>,
+    pub extra_formats: Option<Vec<Format>>,
+    pub captions: Option<CaptionPreset>,
+}
+
+impl VideoChanges {
+    /// `--also` replaces the extra formats; `--no-also` drops them.
+    pub fn new(video: VideoOpts, no_also: bool) -> Self {
+        let format = video.format();
+        let extra_formats = if no_also {
+            Some(Vec::new())
+        } else {
+            Some(video.also).filter(|a| !a.is_empty())
+        };
+        Self {
+            format,
+            extra_formats,
+            captions: video.captions,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Saves new video settings for `clipcut render`. When the app is running
+/// they go through it, which refuses while it is working on the project.
+pub async fn change_video(state: &AppState, id: &str, changes: VideoChanges) -> anyhow::Result<()> {
+    if changes.is_empty() {
+        return Ok(());
+    }
+    let dir = state.store.dir(id);
+    match running_app(state).await {
+        Some(base) if app_serves_folder(&base, id, &dir).await => {
+            let mut body = serde_json::Map::new();
+            if let Some(f) = changes.format {
+                body.insert("format".into(), json!(f));
+            }
+            if let Some(f) = &changes.extra_formats {
+                body.insert("extra_formats".into(), json!(f));
+            }
+            if let Some(c) = changes.captions {
+                body.insert("caption_preset".into(), json!(c));
+            }
+            api(
+                reqwest::Method::PATCH,
+                &format!("{base}/projects/{id}"),
+                Some(Value::Object(body)),
+            )
+            .await
+            .context("could not change the video settings")?;
+        }
+        _ => {
+            state
+                .store
+                .update(id, |p| {
+                    let captions = changes.captions.map(Some);
+                    crate::server::set_video(p, changes.format, changes.extra_formats, captions);
+                    Ok(())
+                })
+                .await?;
+        }
+    }
+    let p = state.store.get(id)?;
+    let captions = p
+        .caption_preset
+        .unwrap_or(state.config().video.caption_preset);
+    println!(
+        "Rendering {} with {} captions",
+        formats(&p),
+        captions.slug()
+    );
     Ok(())
 }
 
@@ -2110,6 +2199,66 @@ mod tests {
         assert!(other.store.exists(ids[2]));
         let leftovers = std::fs::read_dir(other.store.dir(ids[2])).unwrap().count();
         assert_eq!(leftovers, 1, "only project.json is left");
+    }
+
+    #[tokio::test]
+    async fn render_changes_video_settings_here_or_through_the_running_app() {
+        use clipcut_core::Stage;
+        let home = crate::test_support::TestHome::new();
+        let state = home.state();
+        let id = "20261012-091500-3fa9c1";
+        let mut p = crate::test_support::finished_project();
+        p.id = id.into();
+        state.store.create(p).await.unwrap();
+        let stage =
+            |p: &Project, stage: Stage| p.stages.iter().find(|s| s.stage == stage).unwrap().status;
+
+        // No flags: the render is left alone.
+        set_port(&state, free_port());
+        change_video(&state, id, VideoChanges::default())
+            .await
+            .unwrap();
+        assert!(state.store.get(id).unwrap().render.is_some());
+
+        // Nothing listening: the settings change here and only the render is redone.
+        let video = VideoOpts {
+            horizontal: true,
+            captions: Some(CaptionPreset::Hormozi),
+            also: vec![Format::Square, Format::Horizontal],
+            ..Default::default()
+        };
+        change_video(&state, id, VideoChanges::new(video, false))
+            .await
+            .unwrap();
+        let p = state.store.get(id).unwrap();
+        assert_eq!(p.format, Format::Horizontal);
+        assert_eq!(p.extra_formats, [Format::Square]);
+        assert_eq!(p.caption_preset, Some(CaptionPreset::Hormozi));
+        assert!(p.render.is_none());
+        assert_eq!(stage(&p, Stage::Render), Status::Pending);
+        assert_eq!(stage(&p, Stage::Voice), Status::Done);
+        assert!(p.voice_track.is_some());
+
+        // The app is up on this home: it makes the change.
+        let (port, server) = serve(state.clone()).await;
+        set_port(&state, port);
+        let base = running_app(&state).await.unwrap();
+        assert!(app_serves_folder(&base, id, &state.store.dir(id)).await);
+        let changes = VideoChanges::new(VideoOpts::default(), true);
+        assert_eq!(changes.extra_formats, Some(Vec::new()));
+        change_video(&state, id, changes).await.unwrap();
+        let video = VideoOpts {
+            format: Some(Format::Vertical),
+            ..Default::default()
+        };
+        change_video(&state, id, VideoChanges::new(video, false))
+            .await
+            .unwrap();
+        server.abort();
+        let p = state.store.get(id).unwrap();
+        assert_eq!(p.format, Format::Vertical);
+        assert!(p.extra_formats.is_empty());
+        assert_eq!(p.caption_preset, Some(CaptionPreset::Hormozi));
     }
 
     /// A queue with one item in each state, as `queue.json` holds it.
