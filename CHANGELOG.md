@@ -50,6 +50,11 @@ follow [Semantic Versioning](https://semver.org/).
   at once, and it can fix a config.toml that ClipCut won't start with
   (which the error now points to). `--path` prints where the file is and
   `--json` prints every setting.
+- `clipcut render <id>` takes `--format`, `--horizontal`, `--captions`
+  and `--also`, so a finished project can be rendered again in another
+  format or caption style, or with other extra formats (`--no-also` drops
+  them), without redoing the visuals or voiceover. With the app running
+  the change goes through it.
 - `.srt` and `.vtt` caption files and a 1280×720 thumbnail with every
   render.
 - Docs for all of the above in Usage, Configuration, API, Architecture and

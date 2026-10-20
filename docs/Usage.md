@@ -262,13 +262,27 @@ clipcut new "The loudest sound ever recorded" --captions hormozi --also horizont
 ```
 
 `new` runs every stage with no pauses and prints the path of `final.mp4`.
-`new`, `batch` and `clip` share these options:
+`new`, `render`, `batch` and `clip` share these options:
 
 | Option | Effect |
 |---|---|
 | `--format vertical\|horizontal\|square` | Main format (`--horizontal` is a shortcut) |
 | `--captions pop\|hormozi\|mrbeast\|minimal\|karaoke` | Caption style |
 | `--also horizontal,square` | Also export these formats from the same edit |
+
+On `render` they change the project before rendering it again from the
+same beats, visuals and voiceover, as changing them on the project page
+does. `--also` replaces the extra formats there, and `--no-also` stops
+exporting them:
+
+```bash
+clipcut render 3fa9c1 --format square --captions minimal
+clipcut render latest --also horizontal       # add a 16:9 copy
+clipcut render latest --no-also               # only the main format again
+```
+
+With the app running, the change goes through it, so it is refused while
+the app is working on that project.
 
 Make several videos, cut clips from a long video, and find topics:
 
@@ -332,6 +346,7 @@ clipcut show <project-id>                     # one project: stages, files, uplo
 clipcut run <project-id> --from script        # redo script and everything after it
 clipcut run <project-id> --from assets --only # only redo visuals
 clipcut render <project-id>                   # re-render
+clipcut render <project-id> --horizontal      # re-render as 16:9
 clipcut delete <project-id>...                # delete projects and their files
 clipcut doctor                                # check every dependency
 clipcut setup all                             # or: yt-dlp, kokoro, searxng

@@ -73,10 +73,15 @@ enum Command {
         #[arg(long)]
         only: bool,
     },
-    /// Re-render an existing project.
+    /// Re-render a project, optionally in another format or caption style.
     Render {
         /// Project ID, its last few characters, or `latest`.
         id: String,
+        #[command(flatten)]
+        video: cli::VideoOpts,
+        /// Stop exporting extra formats.
+        #[arg(long, conflicts_with = "also")]
+        no_also: bool,
     },
     /// List projects, newest first, with their IDs and where each one stands.
     List {
@@ -309,8 +314,9 @@ async fn main() -> anyhow::Result<()> {
             let id = cli::resolve_id(&state, &id)?;
             run_headless(&state, &id, from, only).await
         }
-        Command::Render { id } => {
+        Command::Render { id, video, no_also } => {
             let id = cli::resolve_id(&state, &id)?;
+            cli::change_video(&state, &id, cli::VideoChanges::new(video, no_also)).await?;
             run_headless(&state, &id, Some(Stage::Render), true).await
         }
         Command::List { limit } => cli::list(&state, limit),
@@ -622,6 +628,28 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(err.contains("one of research, hooks"), "{err}");
+
+        let cli = Cli::try_parse_from([
+            "clipcut", "render", "latest", "--format", "square", "--also", "vertical",
+        ])
+        .unwrap();
+        let Some(Command::Render { video, no_also, .. }) = cli.command else {
+            panic!("not render")
+        };
+        assert_eq!(video.format, Some(Format::Square));
+        assert_eq!(video.also, [Format::Vertical]);
+        assert!(!no_also);
+        assert!(
+            Cli::try_parse_from([
+                "clipcut",
+                "render",
+                "latest",
+                "--no-also",
+                "--also",
+                "square"
+            ])
+            .is_err()
+        );
 
         // Privacy is checked by the command, so its message stays the same.
         let cli =
