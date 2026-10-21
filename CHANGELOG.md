@@ -55,6 +55,10 @@ follow [Semantic Versioning](https://semver.org/).
   format or caption style, or with other extra formats (`--no-also` drops
   them), without redoing the visuals or voiceover. With the app running
   the change goes through it.
+- `clipcut duplicate <id>` copies a project to try another take, as the
+  app's Duplicate button does: the research, hook and script are kept and
+  the later stages are made again by `clipcut run`. With the app running
+  the copy goes through it.
 - `.srt` and `.vtt` caption files and a 1280×720 thumbnail with every
   render.
 - Docs for all of the above in Usage, Configuration, API, Architecture and

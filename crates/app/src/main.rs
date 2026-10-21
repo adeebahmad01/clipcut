@@ -112,6 +112,11 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Copy a project to try another take, keeping its research, hook and script.
+    Duplicate {
+        /// Project ID, its last few characters, or `latest`.
+        id: String,
+    },
     /// Make one video per line of a text file (blank and # lines are skipped).
     Batch {
         #[arg(value_hint = ValueHint::FilePath)]
@@ -324,6 +329,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Delete { ids, yes, force } => {
             cli::delete(&state, cli::DeleteArgs { ids, yes, force }).await
         }
+        Command::Duplicate { id } => cli::duplicate(&state, &id).await,
         Command::Batch {
             file,
             publish,
@@ -547,6 +553,7 @@ mod tests {
             for word in [
                 "render",
                 "queue",
+                "duplicate",
                 "completions",
                 "config",
                 "hormozi",

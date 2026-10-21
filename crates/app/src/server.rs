@@ -941,6 +941,13 @@ async fn duplicate_project(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Project>> {
     let src = project_or_404(&state, &id)?;
+    Ok(Json(state.store.create(duplicate(&src)).await?))
+}
+
+/// A copy of `src` for another take: its settings and finished research,
+/// hooks and script come along and the later stages run again. A clip keeps
+/// its moment and cuts it again. Also used by `clipcut duplicate`.
+pub fn duplicate(src: &Project) -> Project {
     let mut copy = Project::new(
         src.topic.clone(),
         src.notes.clone(),
@@ -987,7 +994,7 @@ async fn duplicate_project(
             *copy.stage_mut(s.stage) = s.clone();
         }
     }
-    Ok(Json(state.store.create(copy).await?))
+    copy
 }
 
 // ---------------------------------------------------------------------------
