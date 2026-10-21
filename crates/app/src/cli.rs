@@ -1,5 +1,6 @@
 //! Command-line batch, queue, clip, publish, ideas, list, show, delete,
-//! render settings and config, and finding a project from part of its ID.
+//! duplicate, render settings and config, and finding a project from part
+//! of its ID.
 //! When the app is already running on this machine they go through its API,
 //! so the two never write the same queue or sign-in at once; otherwise they
 //! run here.
@@ -10,9 +11,10 @@ use std::time::Duration;
 use anyhow::Context;
 use chrono::{DateTime, Local, NaiveDateTime, Utc};
 use clipcut_core::config::Format;
+use clipcut_core::model::ProjectKind;
 use clipcut_core::timeline::CaptionPreset;
 use clipcut_core::tools::TOOL_NAMES;
-use clipcut_core::{Config, Paths, Project, StageState, Status};
+use clipcut_core::{Config, Paths, Project, Stage, StageState, Status};
 use clipcut_sources::IdeaSource;
 use serde_json::{Value, json};
 
@@ -1078,6 +1080,76 @@ pub async fn delete(state: &AppState, args: DeleteArgs) -> anyhow::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// duplicate
+
+/// The last six characters of an ID, which `resolve_id` accepts.
+fn short_id(id: &str) -> String {
+    let skip = id.chars().count().saturating_sub(6);
+    id.chars().skip(skip).collect()
+}
+
+/// What `clipcut duplicate` says about the copy it made of `src`, and how to
+/// go on with it.
+pub fn duplicate_summary(src: &Project, copy: &Project) -> String {
+    let done: Vec<Stage> = copy
+        .stages
+        .iter()
+        .filter(|s| s.status == Status::Done)
+        .map(|s| s.stage)
+        .collect();
+    let kept = match &done[..] {
+        [] => "nothing finished to keep".to_string(),
+        stages => {
+            let labels: Vec<String> = stages.iter().map(|s| s.label().to_lowercase()).collect();
+            format!("kept: {}", labels.join(", "))
+        }
+    };
+    let short = short_id(&copy.id);
+    let mut next = format!("Make it with `clipcut run {short}`");
+    // A clip's beat is its source moment, which a re-run keeps anyway.
+    if copy.kind != ProjectKind::Clip
+        && let Some(&last) = done.last()
+    {
+        let slug = serde_json::to_value(last).unwrap_or_default();
+        next += &format!(
+            ", or redo the {} too with `clipcut run {short} --from {}`",
+            last.label().to_lowercase(),
+            slug.as_str().unwrap_or_default()
+        );
+    }
+    format!("Copied {} to {} ({kept}).\n{next}.\n", src.id, copy.id)
+}
+
+/// Copies a project to try another take, as the app's Duplicate button does.
+/// When the app is running the copy goes through it, so it shows up there at
+/// once.
+pub async fn duplicate(state: &AppState, query: &str) -> anyhow::Result<()> {
+    let id = resolve_id(state, query)?;
+    let src = state.store.get(&id)?;
+    let dir = state.store.dir(&id);
+    let copy = match running_app(state).await {
+        Some(base) if app_serves_folder(&base, &id, &dir).await => {
+            let copy = api(
+                reqwest::Method::POST,
+                &format!("{base}/projects/{id}/duplicate"),
+                None,
+            )
+            .await
+            .with_context(|| format!("could not duplicate {id}"))?;
+            let new_id = copy["id"].as_str().context("the app sent no project ID")?;
+            state.store.get(new_id)?
+        }
+        _ => state
+            .store
+            .create(crate::server::duplicate(&src))
+            .await
+            .with_context(|| format!("could not duplicate {id}"))?,
+    };
+    print!("{}", duplicate_summary(&src, &copy));
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // render
 
 /// The video settings `clipcut render` changes before rendering again.
@@ -1211,10 +1283,7 @@ pub fn queue_table(queue: &QueueState) -> String {
         .iter()
         .enumerate()
         .map(|(n, item)| {
-            let project = item.project_id.as_deref().map_or("-".into(), |id| {
-                let skip = id.chars().count().saturating_sub(6);
-                id.chars().skip(skip).collect()
-            });
+            let project = item.project_id.as_deref().map_or("-".into(), short_id);
             [
                 (n + 1).to_string(),
                 item_status(item.status).into(),
@@ -2199,6 +2268,75 @@ mod tests {
         assert!(other.store.exists(ids[2]));
         let leftovers = std::fs::read_dir(other.store.dir(ids[2])).unwrap().count();
         assert_eq!(leftovers, 1, "only project.json is left");
+    }
+
+    #[tokio::test]
+    async fn duplicate_copies_here_or_through_the_running_app() {
+        let home = crate::test_support::TestHome::new();
+        let state = home.state();
+        let id = "20261012-091500-3fa9c1";
+        let mut src = crate::test_support::finished_project();
+        src.id = id.into();
+        src.voice = Some("bf_emma".into());
+        state.store.create(src).await.unwrap();
+        let src = state.store.get(id).unwrap();
+        let copies = |state: &AppState| {
+            state
+                .store
+                .list()
+                .into_iter()
+                .filter(|p| p.id != id)
+                .collect::<Vec<_>>()
+        };
+
+        // Nothing listening: the copy is made here.
+        set_port(&state, free_port());
+        duplicate(&state, "3fa9c1").await.unwrap();
+        let [copy] = &copies(&state)[..] else {
+            panic!("one copy")
+        };
+        assert_eq!(copy.topic, src.topic);
+        assert_eq!(copy.voice.as_deref(), Some("bf_emma"));
+        assert!(copy.script.is_some());
+        assert!(copy.beats.is_empty() && copy.render.is_none());
+        assert_eq!(
+            crate::pipeline::first_unfinished(copy),
+            Some(clipcut_core::Stage::Beats)
+        );
+        let short = short_id(&copy.id);
+        assert_eq!(
+            duplicate_summary(&src, copy),
+            format!(
+                "Copied {id} to {} (kept: research, hook, script).\nMake it with \
+                 `clipcut run {short}`, or redo the script too with \
+                 `clipcut run {short} --from script`.\n",
+                copy.id
+            )
+        );
+        assert!(
+            state.store.get(id).unwrap().render.is_some(),
+            "the original stays"
+        );
+
+        // The app is up on this home: it makes the copy.
+        let (port, server) = serve(state.clone()).await;
+        set_port(&state, port);
+        duplicate(&state, id).await.unwrap();
+        server.abort();
+        assert_eq!(copies(&state).len(), 2);
+
+        // A clip keeps its moment, so there is no earlier stage to suggest.
+        let clip = crate::test_support::clip_project();
+        let copy = crate::server::duplicate(&clip);
+        let summary = duplicate_summary(&clip, &copy);
+        assert!(summary.contains("(kept: beat sheet)"), "{summary}");
+        assert!(!summary.contains("--from"), "{summary}");
+
+        // A project stopped before anything finished keeps nothing.
+        let fresh = Project::new("Fixture", "", Format::Vertical, 30);
+        let summary = duplicate_summary(&fresh, &crate::server::duplicate(&fresh));
+        assert!(summary.contains("(nothing finished to keep)"), "{summary}");
+        assert!(!summary.contains("--from"), "{summary}");
     }
 
     #[tokio::test]

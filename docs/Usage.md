@@ -83,8 +83,8 @@ With Autopilot off, ClipCut stops after Hook, Script and Beat sheet. You can:
 - re-run any stage with the ↻ button next to it. Later stages are redone;
   earlier ones are kept.
 
-**Duplicate** copies a project so you can try another take without losing
-the first one. **Re-render** only redoes the final render, which is useful
+**Duplicate** (or `clipcut duplicate <id>`) copies a project so you can
+try another take without losing the first one. **Re-render** only redoes the final render, which is useful
 after changing audio or caption settings.
 
 ## Captions, formats and thumbnails
@@ -348,6 +348,7 @@ clipcut run <project-id> --from assets --only # only redo visuals
 clipcut render <project-id>                   # re-render
 clipcut render <project-id> --horizontal      # re-render as 16:9
 clipcut delete <project-id>...                # delete projects and their files
+clipcut duplicate <project-id>                # copy a project to try another take
 clipcut doctor                                # check every dependency
 clipcut setup all                             # or: yt-dlp, kokoro, searxng
 ```
@@ -366,7 +367,8 @@ ID                      STATUS               LENGTH  TOPIC
 They are also the folder names under `projects/`, and are shown in the
 app's URL (`#/p/<id>`).
 
-`run`, `render`, `publish`, `show` and `delete` don't need the whole ID. Give its last few
+`run`, `render`, `publish`, `show`, `delete` and `duplicate` don't need
+the whole ID. Give its last few
 characters (`3fa9c1`), its start (`20261012-0915`), or `latest` for the
 newest project. Any part of at least four characters works as long as only
 one project's ID starts or ends with it; otherwise ClipCut lists the
@@ -432,6 +434,23 @@ so it stops anything it is doing with the project first.
 clipcut delete 3fa9c1 b07e44
 clipcut delete latest --yes
 ```
+
+`clipcut duplicate` does what the project page's Duplicate button does: it
+makes a new project with the same topic, notes and video settings, keeps
+the finished research, hook and script, and leaves the beat sheet,
+visuals, voiceover and render to be made again. A clip keeps its moment
+and cuts it again. The original isn't touched. It prints the new ID and
+how to go on:
+
+```
+$ clipcut duplicate 3fa9c1
+Copied 20261012-091500-3fa9c1 to 20261021-101500-ab12cd (kept: research, hook, script).
+Make it with `clipcut run ab12cd`, or redo the script too with `clipcut run ab12cd --from script`.
+```
+
+The copy is the newest project, so `clipcut run latest` works too, and
+`--from hooks` writes new hooks and a script to go with them. When the app
+is running, the copy is made through it and shows up there straight away.
 
 ### Settings
 
