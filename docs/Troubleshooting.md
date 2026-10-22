@@ -173,6 +173,12 @@ usually after a hand edit; the line below names it. Fix it with
 `clipcut config set <setting> <value>`, or put it back to its default
 with `clipcut config unset <setting>`. `clipcut config` shows the whole file.
 
+**A project says "running" but nothing is happening.**
+ClipCut quit, or the terminal running `clipcut new` or `clipcut run` was
+closed, while the project was being made. Starting the app marks it
+stopped, or run `clipcut stop --force <id>`. Then `clipcut run <id>`
+carries on from the stage it was on.
+
 ## Still stuck?
 
 [Open an issue](https://github.com/adeebahmad01/clipcut/issues/new/choose)

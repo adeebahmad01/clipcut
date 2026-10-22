@@ -1,6 +1,6 @@
 //! Command-line batch, queue, clip, publish, ideas, list, show, delete,
-//! duplicate, render settings and config, and finding a project from part
-//! of its ID.
+//! duplicate, stop, render settings and config, and finding a project from
+//! part of its ID.
 //! When the app is already running on this machine they go through its API,
 //! so the two never write the same queue or sign-in at once; otherwise they
 //! run here.
@@ -990,9 +990,10 @@ pub fn projects_to_delete(
         let project = state.store.get(&id)?;
         if !force && let Some(s) = project.stages.iter().find(|s| s.status == Status::Running) {
             anyhow::bail!(
-                "{id} is running ({}); stop it first, or pass --force if ClipCut quit \
-                 while it ran",
-                s.stage.label().to_lowercase()
+                "{id} is running ({}); stop it first with `clipcut stop {}`, or pass \
+                 --force if ClipCut quit while it ran",
+                s.stage.label().to_lowercase(),
+                short_id(&id)
             );
         }
         projects.push(project);
@@ -1146,6 +1147,121 @@ pub async fn duplicate(state: &AppState, query: &str) -> anyhow::Result<()> {
             .with_context(|| format!("could not duplicate {id}"))?,
     };
     print!("{}", duplicate_summary(&src, &copy));
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// stop
+
+/// The stage `p` is marked as working on.
+fn running_stage(p: &Project) -> Option<Stage> {
+    p.stages
+        .iter()
+        .find(|s| s.status == Status::Running)
+        .map(|s| s.stage)
+}
+
+/// What `clipcut stop` and Ctrl-C say about a project they stopped while it
+/// was on `stage`, and how to go on with it.
+pub fn stopped_line(id: &str, stage: Option<Stage>) -> String {
+    let during = stage
+        .map(|s| format!(" during {}", s.label().to_lowercase()))
+        .unwrap_or_default();
+    format!(
+        "Stopped {id}{during}. Continue with `clipcut run {}`.",
+        short_id(id)
+    )
+}
+
+pub struct StopArgs {
+    pub ids: Vec<String>,
+    pub force: bool,
+}
+
+/// One project `clipcut stop` was given, and how it will be stopped.
+struct ToStop {
+    project: Project,
+    stage: Option<Stage>,
+    /// The running app keeps this project, so it does the stopping.
+    via_app: bool,
+    /// The running app is making it right now.
+    in_app: bool,
+}
+
+/// Stops projects the app is making, as the project page's Cancel button does.
+/// A project marked running that nothing is making, because ClipCut quit
+/// while it ran, is only marked stopped with `force`: another `clipcut`
+/// command may be making it, and that one stops with Ctrl-C.
+pub async fn stop(state: &AppState, args: StopArgs) -> anyhow::Result<()> {
+    let mut ids: Vec<String> = Vec::new();
+    for query in &args.ids {
+        let id = resolve_id(state, query)?;
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    let app = running_app(state).await;
+    let making: Vec<String> = match &app {
+        Some(base) => api(reqwest::Method::GET, &format!("{base}/projects"), None)
+            .await?
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|p| p["running"] == true)
+            .filter_map(|p| p["id"].as_str().map(String::from))
+            .collect(),
+        None => Vec::new(),
+    };
+    // Check every project before stopping any.
+    let mut plan: Vec<ToStop> = Vec::new();
+    for id in ids {
+        let project = state.store.get(&id)?;
+        let via_app = match &app {
+            Some(base) => app_serves_folder(base, &id, &state.store.dir(&id)).await,
+            None => false,
+        };
+        let in_app = via_app && making.contains(&id);
+        let stage = running_stage(&project);
+        if let Some(s) = stage
+            && !in_app
+            && !args.force
+        {
+            anyhow::bail!(
+                "{id} is marked running ({}) but the app isn't making it. If a `clipcut` \
+                 command is, press Ctrl-C there; if ClipCut quit while it ran, pass --force \
+                 to mark it stopped",
+                s.label().to_lowercase()
+            );
+        }
+        plan.push(ToStop {
+            project,
+            stage,
+            via_app,
+            in_app,
+        });
+    }
+    for p in plan {
+        let id = &p.project.id;
+        if p.stage.is_none() && !p.in_app {
+            println!("{id} isn't running.");
+            continue;
+        }
+        if p.via_app {
+            let base = app.as_deref().context("the app stopped running")?;
+            api(
+                reqwest::Method::POST,
+                &format!("{base}/projects/{id}/cancel"),
+                None,
+            )
+            .await
+            .with_context(|| format!("could not stop {id}"))?;
+        } else {
+            crate::pipeline::cancel(state, id)
+                .await
+                .with_context(|| format!("could not stop {id}"))?;
+        }
+        println!("{}", stopped_line(id, p.stage));
+    }
     Ok(())
 }
 
@@ -2337,6 +2453,84 @@ mod tests {
         let summary = duplicate_summary(&fresh, &crate::server::duplicate(&fresh));
         assert!(summary.contains("(nothing finished to keep)"), "{summary}");
         assert!(!summary.contains("--from"), "{summary}");
+    }
+
+    #[tokio::test]
+    async fn stop_cancels_through_the_app_and_needs_force_for_leftovers() {
+        use clipcut_core::Stage;
+        let home = crate::test_support::TestHome::new();
+        let state = home.state();
+        let ids = ["20261011-120033-9d21aa", "20261012-091500-3fa9c1"];
+        fixture_projects(&state, &ids).await;
+        let stop_args = |id: &str, force: bool| StopArgs {
+            ids: vec![id.into()],
+            force,
+        };
+        let mark_running = |id: &'static str| {
+            let state = state.clone();
+            async move {
+                state
+                    .store
+                    .update(id, |p| {
+                        at(p, Stage::Script, Status::Done);
+                        at(p, Stage::Beats, Status::Running);
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            }
+        };
+        let beats = |id: &str| {
+            let p = state.store.get(id).unwrap();
+            p.stages
+                .into_iter()
+                .find(|s| s.stage == Stage::Beats)
+                .unwrap()
+        };
+
+        assert_eq!(
+            stopped_line(ids[1], Some(Stage::Beats)),
+            format!(
+                "Stopped {} during beat sheet. Continue with `clipcut run 3fa9c1`.",
+                ids[1]
+            )
+        );
+        assert_eq!(
+            stopped_line(ids[1], None),
+            format!("Stopped {}. Continue with `clipcut run 3fa9c1`.", ids[1])
+        );
+
+        // Nothing listening: an idle project is left alone, and one left
+        // marked running is only marked stopped with --force.
+        set_port(&state, free_port());
+        stop(&state, stop_args("9d21aa", false)).await.unwrap();
+        let idle = state.store.get(ids[0]).unwrap();
+        assert!(idle.stages.iter().all(|s| s.status == Status::Pending));
+        mark_running(ids[0]).await;
+        let err = stop(&state, stop_args("9d21aa", false))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("the app isn't making it"), "{err}");
+        assert!(err.contains("--force"), "{err}");
+        assert_eq!(beats(ids[0]).status, Status::Running);
+        stop(&state, stop_args("9d21aa", true)).await.unwrap();
+        assert_eq!(beats(ids[0]).status, Status::Failed);
+        assert_eq!(beats(ids[0]).error.as_deref(), Some("cancelled"));
+
+        // The app is up on this home and making the project: it stops it.
+        mark_running(ids[1]).await;
+        state
+            .store
+            .spawn_pipeline(ids[1], std::future::pending())
+            .unwrap();
+        let (port, server) = serve(state.clone()).await;
+        set_port(&state, port);
+        stop(&state, stop_args("3fa9c1", false)).await.unwrap();
+        server.abort();
+        assert!(!state.store.is_running(ids[1]));
+        assert_eq!(beats(ids[1]).status, Status::Failed);
+        assert_eq!(beats(ids[1]).error.as_deref(), Some("cancelled"));
     }
 
     #[tokio::test]

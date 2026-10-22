@@ -59,6 +59,11 @@ follow [Semantic Versioning](https://semver.org/).
   app's Duplicate button does: the research, hook and script are kept and
   the later stages are made again by `clipcut run`. With the app running
   the copy goes through it.
+- `clipcut stop <id>...` stops projects the app is making, as the
+  project page's Cancel button does, and says how to carry on with
+  `clipcut run`. `--force` marks a project stopped when ClipCut quit while
+  it ran. Ctrl-C in `clipcut new`, `run` and `render` now stops the
+  project too, rather than leaving it marked as running.
 - `.srt` and `.vtt` caption files and a 1280×720 thumbnail with every
   render.
 - Docs for all of the above in Usage, Configuration, API, Architecture and

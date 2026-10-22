@@ -349,6 +349,7 @@ clipcut render <project-id>                   # re-render
 clipcut render <project-id> --horizontal      # re-render as 16:9
 clipcut delete <project-id>...                # delete projects and their files
 clipcut duplicate <project-id>                # copy a project to try another take
+clipcut stop <project-id>...                  # stop projects the app is making
 clipcut doctor                                # check every dependency
 clipcut setup all                             # or: yt-dlp, kokoro, searxng
 ```
@@ -367,8 +368,8 @@ ID                      STATUS               LENGTH  TOPIC
 They are also the folder names under `projects/`, and are shown in the
 app's URL (`#/p/<id>`).
 
-`run`, `render`, `publish`, `show`, `delete` and `duplicate` don't need
-the whole ID. Give its last few
+`run`, `render`, `publish`, `show`, `delete`, `duplicate` and `stop` don't
+need the whole ID. Give its last few
 characters (`3fa9c1`), its start (`20261012-0915`), or `latest` for the
 newest project. Any part of at least four characters works as long as only
 one project's ID starts or ends with it; otherwise ClipCut lists the
@@ -426,7 +427,8 @@ clipcut show 3fa9c1 --json | jq -r '.script.title'
 `clipcut delete` shows the projects it matched and how much space they
 use, and asks before deleting them. `--yes` (`-y`) skips the question,
 which scripts need. A project with a running stage is left alone: stop it
-first, or pass `--force` if ClipCut quit while it was running. When the app
+first with `clipcut stop`, or pass `--force` if ClipCut quit while it was
+running. When the app
 is running on the same data directory, the CLI asks it to do the deleting,
 so it stops anything it is doing with the project first.
 
@@ -451,6 +453,25 @@ Make it with `clipcut run ab12cd`, or redo the script too with `clipcut run ab12
 The copy is the newest project, so `clipcut run latest` works too, and
 `--from hooks` writes new hooks and a script to go with them. When the app
 is running, the copy is made through it and shows up there straight away.
+
+`clipcut stop` does what the project page's Cancel button does: the app
+stops working on the project and marks the stage it was on as cancelled.
+Everything finished before that stage is kept, so `clipcut run` picks up
+from there:
+
+```
+$ clipcut stop 3fa9c1
+Stopped 20261012-091500-3fa9c1 during visuals. Continue with `clipcut run 3fa9c1`.
+```
+
+A project made by `clipcut new`, `run` or `render` in a terminal stops
+with Ctrl-C there, which leaves it the same way (a second Ctrl-C quits
+without waiting). If ClipCut quit while a project was running, the project
+still says `running` in `clipcut list` although nothing is making it;
+`clipcut stop --force` marks it stopped. Starting the app does the same
+for every such project. To stop a video the queue is making, use
+`clipcut queue remove` instead, which keeps the item as cancelled so it
+can be retried.
 
 ### Settings
 
