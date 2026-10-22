@@ -117,6 +117,15 @@ enum Command {
         /// Project ID, its last few characters, or `latest`.
         id: String,
     },
+    /// Stop projects the app is making: `clipcut stop 3fa9c1`.
+    Stop {
+        /// Project IDs, their last few characters, or `latest`.
+        #[arg(required = true)]
+        ids: Vec<String>,
+        /// Also mark projects stopped that were left running when ClipCut quit.
+        #[arg(long)]
+        force: bool,
+    },
     /// Make one video per line of a text file (blank and # lines are skipped).
     Batch {
         #[arg(value_hint = ValueHint::FilePath)]
@@ -330,6 +339,7 @@ async fn main() -> anyhow::Result<()> {
             cli::delete(&state, cli::DeleteArgs { ids, yes, force }).await
         }
         Command::Duplicate { id } => cli::duplicate(&state, &id).await,
+        Command::Stop { ids, force } => cli::stop(&state, cli::StopArgs { ids, force }).await,
         Command::Batch {
             file,
             publish,
@@ -444,8 +454,30 @@ async fn run_headless(
     // Headless runs never pause for review.
     state.store.update(id, |p| Ok(p.autopilot = true)).await?;
     pipeline::start(state, id, from, only).await?;
-    while state.store.is_running(id) {
-        tokio::time::sleep(Duration::from_millis(400)).await;
+    let finished = async {
+        while state.store.is_running(id) {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        }
+    };
+    tokio::select! {
+        () = finished => {}
+        _ = tokio::signal::ctrl_c() => {
+            // Ctrl-C stops the project, so it isn't left marked as running.
+            let stage = state
+                .store
+                .get(id)?
+                .stages
+                .iter()
+                .find(|s| s.status == Status::Running)
+                .map(|s| s.stage);
+            tokio::select! {
+                stopped = pipeline::cancel(state, id) => { stopped?; }
+                // A second Ctrl-C quits without waiting.
+                _ = tokio::signal::ctrl_c() => std::process::exit(130),
+            }
+            clipcut_sources::shutdown_browser().await;
+            anyhow::bail!("{}", cli::stopped_line(id, stage));
+        }
     }
     let project = state.store.get(id)?;
     if let Some(failed) = project.stages.iter().find(|s| s.status == Status::Failed) {
@@ -554,6 +586,7 @@ mod tests {
                 "render",
                 "queue",
                 "duplicate",
+                "stop",
                 "completions",
                 "config",
                 "hormozi",
@@ -665,5 +698,12 @@ mod tests {
             cli.command,
             Some(Command::Publish { privacy: Some(p), .. }) if p == "Unlisted"
         ));
+
+        let cli = Cli::try_parse_from(["clipcut", "stop", "3fa9c1", "latest", "--force"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Stop { ids, force: true }) if ids == ["3fa9c1", "latest"]
+        ));
+        assert!(Cli::try_parse_from(["clipcut", "stop"]).is_err());
     }
 }
