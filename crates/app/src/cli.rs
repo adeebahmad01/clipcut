@@ -1,11 +1,11 @@
 //! Command-line batch, queue, clip, publish, ideas, list, show, delete,
-//! duplicate, stop, render settings and config, and finding a project from
-//! part of its ID.
+//! duplicate, stop, edit, render settings and config, and finding a project
+//! from part of its ID.
 //! When the app is already running on this machine they go through its API,
 //! so the two never write the same queue or sign-in at once; otherwise they
 //! run here.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -21,6 +21,7 @@ use serde_json::{Value, json};
 use crate::clips::{self, ClipRequest};
 use crate::publish;
 use crate::queue::{self, AddBody, ItemOptions, ItemStatus, PublishPlan, QueueItem, QueueState};
+use crate::server::PatchBody;
 use crate::state::AppState;
 
 /// A value parser that also lists the accepted words, so `--help` and shell
@@ -1262,6 +1263,226 @@ pub async fn stop(state: &AppState, args: StopArgs) -> anyhow::Result<()> {
         }
         println!("{}", stopped_line(id, p.stage));
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// edit
+
+/// What `clipcut edit` changes; at least one is needed.
+#[derive(clap::Args, Debug, Default)]
+pub struct EditOpts {
+    /// What the video is about; the research and all after it are made again.
+    #[arg(long)]
+    pub topic: Option<String>,
+    /// The brief: angle, audience, facts to mention.
+    #[arg(long)]
+    pub notes: Option<String>,
+    /// Target length in seconds (10–600).
+    #[arg(long)]
+    pub seconds: Option<u32>,
+    /// Narration voice; "" goes back to the one in the settings.
+    #[arg(long)]
+    pub voice: Option<String>,
+    /// Replace the narration with this file's text, or `-` for stdin.
+    #[arg(long, value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
+    pub script: Option<PathBuf>,
+    /// YouTube title.
+    #[arg(long)]
+    pub title: Option<String>,
+    /// YouTube description.
+    #[arg(long)]
+    pub description: Option<String>,
+    /// Hashtags, separated by spaces or commas; "" removes them.
+    #[arg(long)]
+    pub hashtags: Option<String>,
+}
+
+impl EditOpts {
+    fn is_empty(&self) -> bool {
+        [
+            &self.topic,
+            &self.notes,
+            &self.voice,
+            &self.title,
+            &self.description,
+            &self.hashtags,
+        ]
+        .iter()
+        .all(|v| v.is_none())
+            && self.seconds.is_none()
+            && self.script.is_none()
+    }
+
+    fn into_patch(self) -> anyhow::Result<PatchBody> {
+        let script_text = match &self.script {
+            None => None,
+            Some(path) if path.as_os_str() == "-" => Some(
+                std::io::read_to_string(std::io::stdin())
+                    .context("could not read the script from stdin")?,
+            ),
+            Some(path) => Some(
+                std::fs::read_to_string(path)
+                    .with_context(|| format!("could not read {}", path.display()))?,
+            ),
+        };
+        Ok(PatchBody {
+            topic: self.topic,
+            notes: self.notes,
+            voice: self.voice,
+            target_seconds: self.seconds,
+            script_text,
+            title: self.title,
+            description: self.description,
+            hashtags: self.hashtags.as_deref().map(hashtags),
+            ..Default::default()
+        })
+    }
+}
+
+/// `ai, #tech facts` → `#ai #tech #facts`, as the app's hashtag field reads them.
+pub fn hashtags(raw: &str) -> Vec<String> {
+    raw.split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|t| !t.is_empty())
+        .map(|t| {
+            if t.starts_with('#') {
+                t.to_string()
+            } else {
+                format!("#{t}")
+            }
+        })
+        .collect()
+}
+
+/// The names of the fields `patch` gives `p` a new value for.
+fn edited_fields(p: &Project, patch: &PatchBody) -> Vec<&'static str> {
+    let script = p.script.clone().unwrap_or_default();
+    let voice = patch
+        .voice
+        .as_ref()
+        .map(|v| Some(v.trim().to_string()).filter(|v| !v.is_empty()));
+    [
+        (
+            "topic",
+            patch.topic.as_ref().is_some_and(|v| v.trim() != p.topic),
+        ),
+        ("notes", patch.notes.as_ref().is_some_and(|v| *v != p.notes)),
+        (
+            "length",
+            patch.target_seconds.is_some_and(|v| v != p.target_seconds),
+        ),
+        ("voice", voice.is_some_and(|v| v != p.voice)),
+        (
+            "script",
+            patch
+                .script_text
+                .as_ref()
+                .is_some_and(|v| v.trim() != script.text),
+        ),
+        (
+            "title",
+            patch.title.as_ref().is_some_and(|v| *v != script.title),
+        ),
+        (
+            "description",
+            patch
+                .description
+                .as_ref()
+                .is_some_and(|v| *v != script.description),
+        ),
+        (
+            "hashtags",
+            patch
+                .hashtags
+                .as_ref()
+                .is_some_and(|v| *v != script.hashtags),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(name, changed)| changed.then_some(name))
+    .collect()
+}
+
+/// `a`, `a and b`, `a, b and c`.
+fn and_list(items: &[&str]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// What `clipcut edit` says it changed in `before` (now `after`), and how
+/// to make the video again.
+pub fn edit_summary(before: &Project, after: &Project, fields: &[&str]) -> String {
+    if fields.is_empty() {
+        return format!("{} already has those; nothing changed.\n", before.id);
+    }
+    let mut out = format!("Changed the {} of {}.\n", and_list(fields), before.id);
+    let short = short_id(&after.id);
+    match crate::pipeline::first_unfinished(after) {
+        Some(Stage::Render) => out += &format!("Render it with `clipcut render {short}`.\n"),
+        Some(stage) => {
+            out += &format!(
+                "`clipcut run {short}` carries on from the {}.\n",
+                stage.label().to_lowercase()
+            )
+        }
+        None => {}
+    }
+    let details = ["title", "description", "hashtags"];
+    if !before.published.is_empty() && fields.iter().any(|f| details.contains(f)) {
+        out += "Videos already on YouTube keep their old title, description and hashtags.\n";
+    }
+    out
+}
+
+/// Changes a project's topic, brief, length, voice, script or YouTube
+/// details, as the app's edit fields do, clearing the stages the change makes
+/// stale. When the app is running the change goes through it, which refuses
+/// while it is working on the project.
+pub async fn edit(state: &AppState, query: &str, opts: EditOpts) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !opts.is_empty(),
+        "say what to change: --topic, --notes, --seconds, --voice, --script, --title, \
+         --description or --hashtags"
+    );
+    let id = resolve_id(state, query)?;
+    let before = state.store.get(&id)?;
+    let patch = opts.into_patch()?;
+    let fields = edited_fields(&before, &patch);
+    let dir = state.store.dir(&id);
+    let after = match running_app(state).await {
+        Some(base) if app_serves_folder(&base, &id, &dir).await => {
+            api(
+                reqwest::Method::PATCH,
+                &format!("{base}/projects/{id}"),
+                Some(serde_json::to_value(&patch)?),
+            )
+            .await
+            .with_context(|| format!("could not edit {id}"))?;
+            state.store.get(&id)?
+        }
+        _ => {
+            if let Some(stage) = running_stage(&before) {
+                anyhow::bail!(
+                    "{id} is marked running ({}); let it finish, or stop it with \
+                     `clipcut stop {}` first",
+                    stage.label().to_lowercase(),
+                    short_id(&id)
+                );
+            }
+            crate::server::check_patch(&before, &patch)
+                .with_context(|| format!("could not edit {id}"))?;
+            state
+                .store
+                .update(&id, |p| crate::server::apply_patch(p, patch))
+                .await
+                .with_context(|| format!("could not edit {id}"))?
+                .0
+        }
+    };
+    print!("{}", edit_summary(&before, &after, &fields));
     Ok(())
 }
 
@@ -2591,6 +2812,178 @@ mod tests {
         assert_eq!(p.format, Format::Vertical);
         assert!(p.extra_formats.is_empty());
         assert_eq!(p.caption_preset, Some(CaptionPreset::Hormozi));
+    }
+
+    #[test]
+    fn hashtags_get_one_hash_each() {
+        assert_eq!(hashtags("ai, #tech  facts,"), ["#ai", "#tech", "#facts"]);
+        assert!(hashtags("").is_empty());
+        assert!(hashtags(" , ").is_empty());
+    }
+
+    #[test]
+    fn edit_summary_names_the_changes_and_what_to_run() {
+        use clipcut_core::Stage;
+        let mut before = crate::test_support::finished_project();
+        before.id = "20261012-091500-3fa9c1".into();
+        before.voice = Some("fixture".into());
+        let patch = PatchBody {
+            title: Some("New title".into()),
+            hashtags: Some(vec!["#new".into()]),
+            voice: Some(" fixture ".into()),
+            notes: Some(String::new()),
+            ..Default::default()
+        };
+        // The voice and notes are the same, so only two fields change.
+        let fields = edited_fields(&before, &patch);
+        assert_eq!(fields, ["title", "hashtags"]);
+        let mut after = before.clone();
+        crate::server::apply_patch(&mut after, patch).unwrap();
+        assert_eq!(
+            edit_summary(&before, &after, &fields),
+            "Changed the title and hashtags of 20261012-091500-3fa9c1.\n\
+             Render it with `clipcut render 3fa9c1`.\n"
+        );
+
+        // Once it is on YouTube, the upload keeps the old details.
+        before.published = serde_json::from_value(json!([{
+            "platform": "youtube", "video_id": "abc", "url": "https://youtu.be/abc",
+            "privacy": "private", "format": "vertical", "uploaded_at": "2026-10-12T09:15:00Z"
+        }]))
+        .unwrap();
+        let summary = edit_summary(&before, &after, &fields);
+        assert!(summary.ends_with("keep their old title, description and hashtags.\n"));
+
+        let patch = PatchBody {
+            topic: Some("Another topic".into()),
+            target_seconds: Some(45),
+            ..Default::default()
+        };
+        let fields = edited_fields(&before, &patch);
+        let mut after = before.clone();
+        crate::server::apply_patch(&mut after, patch).unwrap();
+        assert_eq!(
+            crate::pipeline::first_unfinished(&after),
+            Some(Stage::Research)
+        );
+        assert_eq!(
+            edit_summary(&before, &after, &fields),
+            "Changed the topic and length of 20261012-091500-3fa9c1.\n\
+             `clipcut run 3fa9c1` carries on from the research.\n"
+        );
+
+        assert_eq!(
+            edit_summary(&before, &before, &[]),
+            "20261012-091500-3fa9c1 already has those; nothing changed.\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_changes_projects_here_or_through_the_running_app() {
+        use clipcut_core::Stage;
+        let home = crate::test_support::TestHome::new();
+        let state = home.state();
+        let id = "20261012-091500-3fa9c1";
+        let mut p = crate::test_support::finished_project();
+        p.id = id.into();
+        state.store.create(p).await.unwrap();
+        let stage =
+            |p: &Project, stage: Stage| p.stages.iter().find(|s| s.stage == stage).unwrap().status;
+        let err = |e: anyhow::Error| format!("{e:#}");
+
+        set_port(&state, free_port());
+        let nothing = edit(&state, id, EditOpts::default()).await.unwrap_err();
+        assert!(err(nothing).starts_with("say what to change"));
+
+        // Nothing listening: the details change here and only the render is redone.
+        let opts = EditOpts {
+            title: Some("A better title".into()),
+            hashtags: Some("facts shorts".into()),
+            ..Default::default()
+        };
+        edit(&state, "3fa9c1", opts).await.unwrap();
+        let p = state.store.get(id).unwrap();
+        let script = p.script.as_ref().unwrap();
+        assert_eq!(script.title, "A better title");
+        assert_eq!(script.hashtags, ["#facts", "#shorts"]);
+        assert_eq!(script.text, "One fixture sentence.");
+        assert!(p.render.is_none());
+        assert_eq!(stage(&p, Stage::Render), Status::Pending);
+        assert_eq!(stage(&p, Stage::Voice), Status::Done);
+
+        // A new script from a file keeps the script and redoes the beat sheet on.
+        let file = home.0.join("script.txt");
+        std::fs::write(&file, "  First line. Second line!\n").unwrap();
+        let opts = EditOpts {
+            script: Some(file),
+            ..Default::default()
+        };
+        edit(&state, id, opts).await.unwrap();
+        let p = state.store.get(id).unwrap();
+        let script = p.script.as_ref().unwrap();
+        assert_eq!(script.text, "First line. Second line!");
+        assert_eq!(script.sentences, ["First line.", "Second line!"]);
+        assert_eq!(script.title, "A better title");
+        assert_eq!(stage(&p, Stage::Script), Status::Done);
+        assert_eq!(crate::pipeline::first_unfinished(&p), Some(Stage::Beats));
+
+        // The app's limits hold here too, and nothing is written.
+        let opts = EditOpts {
+            seconds: Some(5),
+            ..Default::default()
+        };
+        let too_short = edit(&state, id, opts).await.unwrap_err();
+        assert!(err(too_short).contains("between 10 and 600"));
+        let opts = EditOpts {
+            script: Some(home.0.join("missing.txt")),
+            ..Default::default()
+        };
+        assert!(err(edit(&state, id, opts).await.unwrap_err()).contains("missing.txt"));
+        assert_eq!(state.store.get(id).unwrap().target_seconds, 15);
+
+        // A project marked running is left alone.
+        state
+            .store
+            .update(id, |p| {
+                p.stage_mut(Stage::Beats).status = Status::Running;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let opts = || EditOpts {
+            voice: Some("bf_emma".into()),
+            ..Default::default()
+        };
+        let running = edit(&state, id, opts()).await.unwrap_err();
+        assert!(err(running).contains("is marked running (beat sheet)"));
+        state
+            .store
+            .update(id, |p| {
+                p.stage_mut(Stage::Beats).status = Status::Pending;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        // The app is up on this home: it makes the change, with the same checks.
+        let clip_id = "20261012-101500-c11p00";
+        let mut clip = crate::test_support::clip_project();
+        clip.id = clip_id.into();
+        state.store.create(clip).await.unwrap();
+        let (port, server) = serve(state.clone()).await;
+        set_port(&state, port);
+        edit(&state, id, opts()).await.unwrap();
+        let topic = EditOpts {
+            topic: Some("Something else".into()),
+            ..Default::default()
+        };
+        let clip_topic = edit(&state, clip_id, topic).await.unwrap_err();
+        server.abort();
+        assert_eq!(
+            state.store.get(id).unwrap().voice.as_deref(),
+            Some("bf_emma")
+        );
+        assert!(err(clip_topic).contains("can't edit the script of a clip"));
     }
 
     /// A queue with one item in each state, as `queue.json` holds it.

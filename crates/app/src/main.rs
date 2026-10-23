@@ -126,6 +126,13 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Change a project's topic, script, title, hashtags and more.
+    Edit {
+        /// Project ID, its last few characters, or `latest`.
+        id: String,
+        #[command(flatten)]
+        edit: cli::EditOpts,
+    },
     /// Make one video per line of a text file (blank and # lines are skipped).
     Batch {
         #[arg(value_hint = ValueHint::FilePath)]
@@ -340,6 +347,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Duplicate { id } => cli::duplicate(&state, &id).await,
         Command::Stop { ids, force } => cli::stop(&state, cli::StopArgs { ids, force }).await,
+        Command::Edit { id, edit } => cli::edit(&state, &id, edit).await,
         Command::Batch {
             file,
             publish,
@@ -690,6 +698,24 @@ mod tests {
             ])
             .is_err()
         );
+
+        let cli = Cli::try_parse_from([
+            "clipcut",
+            "edit",
+            "3fa9c1",
+            "--title",
+            "New title",
+            "--hashtags",
+            "",
+        ])
+        .unwrap();
+        let Some(Command::Edit { id, edit }) = cli.command else {
+            panic!("not edit")
+        };
+        assert_eq!(id, "3fa9c1");
+        assert_eq!(edit.title.as_deref(), Some("New title"));
+        assert_eq!(edit.hashtags.as_deref(), Some(""));
+        assert!(edit.topic.is_none() && edit.script.is_none());
 
         // Privacy is checked by the command, so its message stays the same.
         let cli =
