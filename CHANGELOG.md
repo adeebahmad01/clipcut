@@ -64,6 +64,11 @@ follow [Semantic Versioning](https://semver.org/).
   `clipcut run`. `--force` marks a project stopped when ClipCut quit while
   it ran. Ctrl-C in `clipcut new`, `run` and `render` now stops the
   project too, rather than leaving it marked as running.
+- `clipcut edit <id>` changes a project's topic, notes, length, voice,
+  script (`--script file.txt`, or `-` for stdin) and YouTube title,
+  description and hashtags, as the project page does, and says what to run
+  to make the video again. With the app running the change goes through
+  it.
 - `.srt` and `.vtt` caption files and a 1280×720 thumbnail with every
   render.
 - Docs for all of the above in Usage, Configuration, API, Architecture and

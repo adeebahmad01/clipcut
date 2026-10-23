@@ -83,6 +83,10 @@ With Autopilot off, ClipCut stops after Hook, Script and Beat sheet. You can:
 - re-run any stage with the ↻ button next to it. Later stages are redone;
   earlier ones are kept.
 
+`clipcut edit <id>` makes the same kind of edits from a terminal: the
+topic, notes, length, voice, script, and the title, description and
+hashtags used on YouTube.
+
 **Duplicate** (or `clipcut duplicate <id>`) copies a project so you can
 try another take without losing the first one. **Re-render** only redoes the final render, which is useful
 after changing audio or caption settings.
@@ -349,6 +353,7 @@ clipcut render <project-id>                   # re-render
 clipcut render <project-id> --horizontal      # re-render as 16:9
 clipcut delete <project-id>...                # delete projects and their files
 clipcut duplicate <project-id>                # copy a project to try another take
+clipcut edit <project-id> --title "…"         # change the topic, script, title, hashtags…
 clipcut stop <project-id>...                  # stop projects the app is making
 clipcut doctor                                # check every dependency
 clipcut setup all                             # or: yt-dlp, kokoro, searxng
@@ -368,8 +373,8 @@ ID                      STATUS               LENGTH  TOPIC
 They are also the folder names under `projects/`, and are shown in the
 app's URL (`#/p/<id>`).
 
-`run`, `render`, `publish`, `show`, `delete`, `duplicate` and `stop` don't
-need the whole ID. Give its last few
+`run`, `render`, `publish`, `show`, `delete`, `duplicate`, `stop` and
+`edit` don't need the whole ID. Give its last few
 characters (`3fa9c1`), its start (`20261012-0915`), or `latest` for the
 newest project. Any part of at least four characters works as long as only
 one project's ID starts or ends with it; otherwise ClipCut lists the
@@ -472,6 +477,40 @@ still says `running` in `clipcut list` although nothing is making it;
 for every such project. To stop a video the queue is making, use
 `clipcut queue remove` instead, which keeps the item as cancelled so it
 can be retried.
+
+`clipcut edit` changes a project the way the project page's fields do, and
+clears what the change makes out of date. A new topic or notes means new
+research and everything after it; a new length, a new script; a new
+voice, the voiceover and render. A new title, description or hashtags only
+needs a new render, since the thumbnail shows the title. It says what
+changed and what to run next:
+
+```
+$ clipcut edit 3fa9c1 --title "The Moon Is Leaving Us" --hashtags "space, moon"
+Changed the title and hashtags of 20261012-091500-3fa9c1.
+Render it with `clipcut render 3fa9c1`.
+```
+
+| Option | Changes |
+|---|---|
+| `--topic`, `--notes` | what the video is about, and the brief for the research |
+| `--seconds` | the target length, 10–600 |
+| `--voice` | the narration voice; `--voice ""` goes back to the one in the settings |
+| `--script <file>` | the narration, read from a file, or from stdin with `-`; ClipCut keeps the script and makes the beat sheet again from it |
+| `--title`, `--description` | the YouTube title and description |
+| `--hashtags` | the hashtags, separated by spaces or commas (`#` is added); `--hashtags ""` removes them |
+
+```bash
+clipcut show 3fa9c1 --json | jq -r .script.text > script.txt
+$EDITOR script.txt
+clipcut edit 3fa9c1 --script script.txt && clipcut run 3fa9c1
+```
+
+A clip's topic, notes, script and length come from its source video, so
+only its voice and YouTube details can be changed. Videos already uploaded
+keep the details they were uploaded with. When the app is running, the
+edit goes through it, and it refuses while the app is working on the
+project; without the app, a project marked running is left alone.
 
 ### Settings
 
