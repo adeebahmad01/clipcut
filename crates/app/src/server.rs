@@ -196,7 +196,16 @@ async fn same_origin_mutations(
 // ---------------------------------------------------------------------------
 // Errors
 
+#[derive(Debug)]
 pub struct ApiError(StatusCode, String);
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.1)
+    }
+}
+
+impl std::error::Error for ApiError {}
 
 impl ApiError {
     fn bad_request(msg: impl Into<String>) -> Self {
@@ -694,23 +703,41 @@ async fn get_project(
     Ok(Json(project_or_404(&state, &id)?))
 }
 
-#[derive(Deserialize, Default)]
-struct PatchBody {
-    topic: Option<String>,
-    notes: Option<String>,
-    voice: Option<String>,
-    autopilot: Option<bool>,
-    format: Option<Format>,
-    target_seconds: Option<u32>,
-    chosen_hook: Option<usize>,
-    script_text: Option<String>,
-    title: Option<String>,
-    description: Option<String>,
-    hashtags: Option<Vec<String>>,
+/// The fields of a project that `PATCH /projects/{id}` and `clipcut edit`
+/// change; any left out stay as they are.
+#[derive(Deserialize, Serialize, Default, Debug)]
+pub struct PatchBody {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topic: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub voice: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub autopilot: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<Format>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_seconds: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chosen_hook: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub script_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hashtags: Option<Vec<String>>,
     /// `null` goes back to the configured default.
-    #[serde(default, deserialize_with = "present")]
-    caption_preset: Option<Option<CaptionPreset>>,
-    extra_formats: Option<Vec<Format>>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub caption_preset: Option<Option<CaptionPreset>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra_formats: Option<Vec<Format>>,
 }
 
 /// Tells a field sent as `null` apart from one left out.
@@ -730,12 +757,24 @@ async fn patch_project(
     let _operation = state.store.operation(&id).await;
     let current = project_or_404(&state, &id)?;
     ensure_editable(&state, &id)?;
+    check_patch(&current, &body)?;
+    let (project, _) = state
+        .store
+        .update(&id, |p| apply_patch(p, body))
+        .await
+        .map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
+    Ok(Json(project))
+}
+
+/// Refuses a patch the project can't take: script edits on a clip, text
+/// that is too long, an empty topic or a length out of range.
+pub(crate) fn check_patch(current: &Project, body: &PatchBody) -> ApiResult<()> {
     if body.topic.is_some()
         || body.notes.is_some()
         || body.chosen_hook.is_some()
         || body.script_text.is_some()
     {
-        ensure_story(&current, "script")?;
+        ensure_story(current, "script")?;
     }
     for (value, max, name) in [
         (body.topic.as_deref(), 1000, "topic"),
@@ -768,79 +807,77 @@ async fn patch_project(
             limited_text(tag, 100, "hashtag")?;
         }
     }
-    let (project, _) = state
-        .store
-        .update(&id, |p| {
-            let topic_changed = body.topic.as_ref().is_some_and(|v| p.topic != v.trim());
-            let notes_changed = body.notes.as_ref().is_some_and(|v| p.notes != *v);
-            if topic_changed || notes_changed {
-                pipeline::reset_from(p, Stage::Research);
-            }
-            if let Some(v) = body.topic {
-                p.topic = v.trim().into();
-            }
-            if let Some(v) = body.notes {
-                p.notes = v;
-            }
-            if let Some(v) = body.voice {
-                let voice = Some(v.trim().to_string()).filter(|v| !v.is_empty());
-                if p.voice != voice {
-                    pipeline::reset_from(p, Stage::Voice);
-                    p.voice = voice;
-                }
-            }
-            if let Some(v) = body.autopilot {
-                p.autopilot = v;
-            }
-            set_video(p, body.format, body.extra_formats, body.caption_preset);
-            if let Some(v) = body.target_seconds {
-                anyhow::ensure!(
-                    p.kind == ProjectKind::Story || p.target_seconds == v,
-                    "a clip's length comes from its source moment"
-                );
-                if p.target_seconds != v {
-                    pipeline::reset_from(p, Stage::Script);
-                    p.target_seconds = v;
-                }
-            }
-            if let Some(i) = body.chosen_hook {
-                anyhow::ensure!(i < p.hooks.len(), "hook {i} does not exist");
-                if p.chosen_hook != Some(i) {
-                    p.chosen_hook = Some(i);
-                    pipeline::reset_from(p, Stage::Script);
-                }
-            }
-            if let Some(text) = body.script_text {
-                let text = text.trim().to_string();
-                anyhow::ensure!(!text.is_empty(), "the script cannot be empty");
-                let script = p.script.get_or_insert_with(Script::default);
-                if script.text != text {
-                    script.sentences = split_sentences(&text);
-                    script.text = text;
-                    pipeline::reset_from(p, Stage::Beats);
-                    let s = p.stage_mut(Stage::Script);
-                    s.status = clipcut_core::Status::Done;
-                    s.error = None;
-                }
-            }
-            if body.title.is_some() || body.description.is_some() || body.hashtags.is_some() {
-                pipeline::reset_from(p, Stage::Render);
-                let script = p.script.get_or_insert_with(Script::default);
-                if let Some(v) = body.title {
-                    script.title = v;
-                }
-                if let Some(v) = body.description {
-                    script.description = v;
-                }
-                if let Some(v) = body.hashtags {
-                    script.hashtags = v;
-                }
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
-    Ok(Json(project))
+    Ok(())
+}
+
+/// Applies a checked patch, clearing the stages each change makes stale.
+pub(crate) fn apply_patch(p: &mut Project, body: PatchBody) -> anyhow::Result<()> {
+    let topic_changed = body.topic.as_ref().is_some_and(|v| p.topic != v.trim());
+    let notes_changed = body.notes.as_ref().is_some_and(|v| p.notes != *v);
+    if topic_changed || notes_changed {
+        pipeline::reset_from(p, Stage::Research);
+    }
+    if let Some(v) = body.topic {
+        p.topic = v.trim().into();
+    }
+    if let Some(v) = body.notes {
+        p.notes = v;
+    }
+    if let Some(v) = body.voice {
+        let voice = Some(v.trim().to_string()).filter(|v| !v.is_empty());
+        if p.voice != voice {
+            pipeline::reset_from(p, Stage::Voice);
+            p.voice = voice;
+        }
+    }
+    if let Some(v) = body.autopilot {
+        p.autopilot = v;
+    }
+    set_video(p, body.format, body.extra_formats, body.caption_preset);
+    if let Some(v) = body.target_seconds {
+        anyhow::ensure!(
+            p.kind == ProjectKind::Story || p.target_seconds == v,
+            "a clip's length comes from its source moment"
+        );
+        if p.target_seconds != v {
+            pipeline::reset_from(p, Stage::Script);
+            p.target_seconds = v;
+        }
+    }
+    if let Some(i) = body.chosen_hook {
+        anyhow::ensure!(i < p.hooks.len(), "hook {i} does not exist");
+        if p.chosen_hook != Some(i) {
+            p.chosen_hook = Some(i);
+            pipeline::reset_from(p, Stage::Script);
+        }
+    }
+    if let Some(text) = body.script_text {
+        let text = text.trim().to_string();
+        anyhow::ensure!(!text.is_empty(), "the script cannot be empty");
+        let script = p.script.get_or_insert_with(Script::default);
+        if script.text != text {
+            script.sentences = split_sentences(&text);
+            script.text = text;
+            pipeline::reset_from(p, Stage::Beats);
+            let s = p.stage_mut(Stage::Script);
+            s.status = clipcut_core::Status::Done;
+            s.error = None;
+        }
+    }
+    if body.title.is_some() || body.description.is_some() || body.hashtags.is_some() {
+        pipeline::reset_from(p, Stage::Render);
+        let script = p.script.get_or_insert_with(Script::default);
+        if let Some(v) = body.title {
+            script.title = v;
+        }
+        if let Some(v) = body.description {
+            script.description = v;
+        }
+        if let Some(v) = body.hashtags {
+            script.hashtags = v;
+        }
+    }
+    Ok(())
 }
 
 /// Sentence split that keeps the punctuation; joined with spaces it reads like the input.
