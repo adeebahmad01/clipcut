@@ -540,13 +540,36 @@ away, except `server.*` settings, which take effect when you restart it.
 ClipCut won't start with: it shows the file and points to the bad setting,
 and `set` or `unset` fixes it.
 
+### API keys
+
+`clipcut keys` manages the free [API keys](../README.md#free-api-keys-optional)
+that **Settings → Keys** does, without opening the app or editing
+`keys.json`:
+
+```bash
+clipcut keys                     # every service, its keys masked to the last four characters
+clipcut keys add giphy           # paste the key at the prompt, so it stays out of your shell history
+clipcut keys add pexels KEY1 KEY2
+clipcut keys add pexels < pexels-keys.txt  # or pipe them in, one per line
+clipcut keys remove giphy 2      # by its number in `clipcut keys`, or its last four characters
+clipcut keys clear tenor         # every tenor key
+clipcut keys --json              # the same list as JSON, still masked
+```
+
+The services are `giphy`, `tenor`, `pexels`, `pixabay`, `unsplash`,
+`tavily` and `brave`, each with up to five keys. A key that is already
+saved isn't added twice. When the app is running, the change goes through
+it and it uses the keys straight away, and `clipcut keys` also shows which
+keys are resting after a rate limit and which were rejected as invalid.
+
 ### Shell completions
 
 `clipcut completions <shell>` prints a completion script for bash, zsh,
 fish, elvish or PowerShell. Tab then completes commands and options, and
 the values of `--from`, `--format`, `--also`, `--captions`, `--privacy`,
 `--publish` and `setup`. In bash and zsh it also completes setting names
-after `clipcut config get`, `set` and `unset`. Save it where your shell looks for completions,
+after `clipcut config get`, `set` and `unset`, and service names after
+`clipcut keys add`, `remove` and `clear`. Save it where your shell looks for completions,
 then open a new terminal:
 
 ```bash

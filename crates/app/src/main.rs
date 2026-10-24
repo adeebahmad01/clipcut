@@ -235,6 +235,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Show or change the free API keys: `clipcut keys add giphy`.
+    #[command(args_conflicts_with_subcommands = true)]
+    Keys {
+        #[command(subcommand)]
+        action: Option<cli::KeysAction>,
+        /// Print the keys, masked, as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Check tools, models, search and keys.
     Doctor,
     /// Install free components: yt-dlp, kokoro, searxng or all.
@@ -286,6 +295,10 @@ async fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
             return cli::config(&paths, action, json).await;
+        }
+        // Keys only need keys.json.
+        Some(Command::Keys { action, json }) => {
+            return cli::keys(&Paths::resolve(cli.home), action, json).await;
         }
         command => command,
     };
@@ -443,7 +456,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Setup { what } => doctor::setup(&state, &what).await,
-        Command::Completions { .. } | Command::Config { .. } => {
+        Command::Completions { .. } | Command::Config { .. } | Command::Keys { .. } => {
             unreachable!("handled before loading state")
         }
     }
@@ -597,6 +610,7 @@ mod tests {
                 "stop",
                 "completions",
                 "config",
+                "keys",
                 "hormozi",
                 "unlisted",
                 "searxng",
@@ -612,6 +626,7 @@ mod tests {
                     script.contains("video.caption_preset"),
                     "{shell} lacks settings"
                 );
+                assert!(script.contains("pixabay"), "{shell} lacks key services");
             }
         }
     }

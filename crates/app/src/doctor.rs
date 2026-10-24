@@ -144,13 +144,8 @@ pub async fn checks(state: &AppState) -> Vec<Check> {
         } else {
             format!("optional: free key from {label}")
         };
-        out.push(check(
-            &name,
-            has,
-            detail,
-            Some("add a key in Settings → Keys"),
-            false,
-        ));
+        let fix = format!("add a key in Settings → Keys, or run `clipcut keys add {service}`");
+        out.push(check(&name, has, detail, Some(&fix), false));
     }
     out
 }

@@ -113,7 +113,7 @@ More in [docs/Usage.md](docs/Usage.md).
 ## Free API keys (optional)
 
 GIFs and stock footage get better with free keys. Add them in
-**Settings → Keys**. Each service takes up to five keys; ClipCut rotates
+**Settings → Keys**, or with `clipcut keys add giphy`. Each service takes up to five keys; ClipCut rotates
 through them, rests a key that hits a rate limit, and drops one that comes
 back invalid.
 
