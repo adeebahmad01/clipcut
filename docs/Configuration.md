@@ -17,7 +17,8 @@ is optional: a missing key uses the default shown below. ClipCut checks
 every value on load and names the field if one is out of range.
 
 API keys are stored separately in `keys.json` in the same directory, with
-owner-only permissions. Manage them in **Settings → Keys**. The YouTube
+owner-only permissions. Manage them in **Settings → Keys** or with
+[`clipcut keys`](Usage.md#api-keys). The YouTube
 publishing client and sign-in live in `youtube-oauth.json`, also
 owner-only; manage them in **Settings → YouTube** (see
 [Publish to YouTube](Usage.md#publish-to-youtube)).
