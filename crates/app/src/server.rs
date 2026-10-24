@@ -14,7 +14,7 @@ use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use clipcut_core::config::Format;
-use clipcut_core::keys::{KNOWN_SERVICES, MAX_KEYS_PER_SERVICE};
+use clipcut_core::keys::{KNOWN_SERVICES, KeyPool, KeyStore, MAX_KEYS_PER_SERVICE};
 use clipcut_core::model::{ProjectKind, PublishRecord};
 use clipcut_core::paths::ProjectPaths;
 use clipcut_core::timeline::CaptionPreset;
@@ -371,8 +371,9 @@ async fn put_config(
     Ok(Json(state.config()))
 }
 
-fn keys_json(state: &AppState) -> serde_json::Value {
-    let status = state.keys.status();
+/// Every known service with its keys masked, as `GET /api/keys` returns them.
+pub fn keys_json(keys: &KeyPool) -> serde_json::Value {
+    let status = keys.status();
     let services: Vec<_> = KNOWN_SERVICES
         .iter()
         .map(|(id, label)| {
@@ -388,7 +389,7 @@ fn keys_json(state: &AppState) -> serde_json::Value {
 }
 
 async fn get_keys(State(state): State<AppState>) -> Json<serde_json::Value> {
-    Json(keys_json(&state))
+    Json(keys_json(&state.keys))
 }
 
 #[derive(Deserialize)]
@@ -396,30 +397,26 @@ struct KeysBody {
     keys: Vec<String>,
 }
 
-/// `""` keeps the key already in that slot; `"__remove__"` deletes it.
-async fn put_keys(
-    State(state): State<AppState>,
-    Path(service): Path<String>,
-    Json(body): Json<KeysBody>,
-) -> ApiResult<Json<serde_json::Value>> {
+/// `store` with `service`'s keys replaced by `edits`, one per slot: `""`
+/// keeps the key already in that slot, `"__remove__"` deletes it, and
+/// anything else is a new key.
+pub fn edited_keys(
+    mut store: KeyStore,
+    service: &str,
+    edits: &[String],
+) -> Result<KeyStore, String> {
     if !KNOWN_SERVICES.iter().any(|(id, _)| *id == service) {
-        return Err(ApiError::bad_request(format!(
-            "unknown service {service:?}"
-        )));
+        let ids: Vec<&str> = KNOWN_SERVICES.iter().map(|(id, _)| *id).collect();
+        return Err(format!(
+            "unknown service {service:?}; ClipCut takes keys for {}",
+            ids.join(", ")
+        ));
     }
-    if body.keys.len() > MAX_KEYS_PER_SERVICE {
-        return Err(ApiError::bad_request(format!(
-            "at most {MAX_KEYS_PER_SERVICE} keys per service"
-        )));
+    if edits.len() > MAX_KEYS_PER_SERVICE {
+        return Err(format!("at most {MAX_KEYS_PER_SERVICE} keys per service"));
     }
-    for key in &body.keys {
-        limited_text(key, 4096, "API key")?;
-    }
-    let _settings = state.settings_lock.lock().await;
-    let mut store = state.keys.store();
-    let existing = store.services.get(&service).cloned().unwrap_or_default();
-    let keys: Vec<String> = body
-        .keys
+    let existing = store.services.get(service).cloned().unwrap_or_default();
+    let keys: Vec<String> = edits
         .iter()
         .enumerate()
         .filter_map(|(i, k)| match k.trim() {
@@ -429,15 +426,27 @@ async fn put_keys(
         })
         .collect();
     if keys.is_empty() {
-        store.services.remove(&service);
+        store.services.remove(service);
     } else {
-        store.services.insert(service, keys);
+        store.services.insert(service.to_string(), keys);
     }
-    store
-        .validate()
-        .map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
+    store.validate().map_err(|e| format!("{e:#}"))?;
+    Ok(store)
+}
+
+async fn put_keys(
+    State(state): State<AppState>,
+    Path(service): Path<String>,
+    Json(body): Json<KeysBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    for key in &body.keys {
+        limited_text(key, 4096, "API key")?;
+    }
+    let _settings = state.settings_lock.lock().await;
+    let store =
+        edited_keys(state.keys.store(), &service, &body.keys).map_err(ApiError::bad_request)?;
     state.keys.replace(store)?;
-    Ok(Json(keys_json(&state)))
+    Ok(Json(keys_json(&state.keys)))
 }
 
 async fn voices(State(state): State<AppState>) -> Json<serde_json::Value> {
