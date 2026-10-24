@@ -1,5 +1,5 @@
 //! Command-line batch, queue, clip, publish, ideas, list, show, delete,
-//! duplicate, stop, edit, render settings and config, and finding a project
+//! duplicate, stop, edit, render settings, config and API keys, and finding a project
 //! from part of its ID.
 //! When the app is already running on this machine they go through its API,
 //! so the two never write the same queue or sign-in at once; otherwise they
@@ -11,6 +11,7 @@ use std::time::Duration;
 use anyhow::Context;
 use chrono::{DateTime, Local, NaiveDateTime, Utc};
 use clipcut_core::config::Format;
+use clipcut_core::keys::{KeyPool, MAX_KEYS_PER_SERVICE};
 use clipcut_core::model::ProjectKind;
 use clipcut_core::timeline::CaptionPreset;
 use clipcut_core::tools::TOOL_NAMES;
@@ -2157,6 +2158,261 @@ pub async fn config(paths: &Paths, action: Option<ConfigAction>, json: bool) -> 
 }
 
 // ---------------------------------------------------------------------------
+// keys
+
+/// The services `clipcut keys` takes keys for, for completion; a test checks
+/// them against `KNOWN_SERVICES`.
+pub const KEY_SERVICES: OneOf<String> = OneOf::hint(&[
+    "giphy", "tenor", "pexels", "pixabay", "unsplash", "tavily", "brave",
+]);
+
+#[derive(clap::Subcommand, Debug, Clone)]
+pub enum KeysAction {
+    /// Save keys for a service: `clipcut keys add giphy`, then paste the key.
+    Add {
+        #[arg(value_parser = KEY_SERVICES)]
+        service: String,
+        /// The keys. Leave them off to paste one at a prompt or pipe them in,
+        /// one per line, so they stay out of your shell history.
+        keys: Vec<String>,
+    },
+    /// Remove one key: `clipcut keys remove giphy 2`.
+    Remove {
+        #[arg(value_parser = KEY_SERVICES)]
+        service: String,
+        /// Its number in `clipcut keys`, or its last four characters.
+        key: String,
+    },
+    /// Remove every key of a service.
+    Clear {
+        #[arg(value_parser = KEY_SERVICES)]
+        service: String,
+    },
+}
+
+/// What a key's state in the running app means.
+fn key_state(state: &str) -> &str {
+    match state {
+        "cooling_down" => "resting after a rate limit or server error",
+        "invalid" => "rejected as invalid, skipped until you change it",
+        other => other,
+    }
+}
+
+/// The slots of `service` in a `GET /api/keys` answer.
+fn key_slots<'a>(keys: &'a Value, service: &str) -> &'a [Value] {
+    keys["services"]
+        .as_array()
+        .and_then(|services| services.iter().find(|s| s["id"] == service))
+        .and_then(|s| s["slots"].as_array())
+        .map_or(&[], Vec::as_slice)
+}
+
+fn slot_line(number: usize, slot: &Value, with_state: bool) -> String {
+    let hint = slot["hint"].as_str().unwrap_or("****");
+    match slot["state"].as_str() {
+        Some(state) if with_state => format!("  {number}  …{hint}  {}\n", key_state(state)),
+        _ => format!("  {number}  …{hint}\n"),
+    }
+}
+
+/// What `clipcut keys` prints: every service with its keys, numbered from 1
+/// and masked to their last four characters. Only the running app knows
+/// which keys are resting or were rejected, so `with_state` adds that.
+pub fn keys_table(keys: &Value, with_state: bool) -> String {
+    let mut out = String::new();
+    for service in keys["services"].as_array().into_iter().flatten() {
+        let id = service["id"].as_str().unwrap_or_default();
+        out += &format!(
+            "{id:<9} {}\n",
+            service["label"].as_str().unwrap_or_default()
+        );
+        let slots = key_slots(keys, id);
+        if slots.is_empty() {
+            out += "  no keys\n";
+        }
+        for (i, slot) in slots.iter().enumerate() {
+            out += &slot_line(i + 1, slot, with_state);
+        }
+    }
+    out
+}
+
+/// The slot `which` names among `slots`: its number from 1, or its last four
+/// characters (so pasting the whole key works too).
+pub fn find_key(service: &str, slots: &[Value], which: &str) -> anyhow::Result<usize> {
+    let which = which.trim();
+    anyhow::ensure!(!slots.is_empty(), "{service} has no keys");
+    if which.len() <= 2
+        && let Ok(number) = which.parse::<usize>()
+        && (1..=slots.len()).contains(&number)
+    {
+        return Ok(number - 1);
+    }
+    let tail: String = {
+        let chars: Vec<char> = which.chars().collect();
+        chars[chars.len().saturating_sub(4)..].iter().collect()
+    };
+    let matches: Vec<usize> = (0..slots.len())
+        .filter(|&i| tail.chars().count() == 4 && slots[i]["hint"] == tail.as_str())
+        .collect();
+    match matches[..] {
+        [i] => Ok(i),
+        [] => {
+            let numbers = match slots.len() {
+                1 => "1".to_string(),
+                n => format!("1–{n}"),
+            };
+            anyhow::bail!(
+                "{service} has no key {which:?}; give its number ({numbers}) or last four characters, as `clipcut keys` shows"
+            )
+        }
+        _ => anyhow::bail!(
+            "{} {service} keys end in {tail:?}; give its number instead",
+            matches.len()
+        ),
+    }
+}
+
+/// Keys from the command line, or else from stdin: one pasted at a prompt,
+/// or one per line when piped.
+fn keys_to_add(service: &str, keys: Vec<String>) -> anyhow::Result<Vec<String>> {
+    use std::io::{IsTerminal, Write};
+    let keys = if keys.is_empty() {
+        let stdin = std::io::stdin();
+        if stdin.is_terminal() {
+            eprint!("Paste the {service} key and press Enter: ");
+            std::io::stderr().flush()?;
+            let mut line = String::new();
+            stdin.read_line(&mut line)?;
+            vec![line]
+        } else {
+            std::io::read_to_string(stdin)
+                .context("could not read the keys from stdin")?
+                .lines()
+                .map(str::to_string)
+                .collect()
+        }
+    } else {
+        keys
+    };
+    let keys: Vec<String> = keys
+        .iter()
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+        .collect();
+    anyhow::ensure!(!keys.is_empty(), "no {service} key given");
+    Ok(keys)
+}
+
+/// `clipcut keys`: list the API keys, or add, remove or clear a service's.
+/// Changes go through the running app when there is one, so it uses them at
+/// once; otherwise they are written to keys.json here.
+pub async fn keys(paths: &Paths, action: Option<KeysAction>, json: bool) -> anyhow::Result<()> {
+    let port = Config::read(&paths.config_file())
+        .map(|c| c.server.port)
+        .unwrap_or(Config::default().server.port);
+    keys_via(&paths.keys_file(), app_on(port).await, action, json).await
+}
+
+/// `clipcut keys` through the app's API at `app`, or on `file` without it.
+async fn keys_via(
+    file: &Path,
+    app: Option<String>,
+    action: Option<KeysAction>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let current = match &app {
+        Some(base) => api(reqwest::Method::GET, &format!("{base}/keys"), None).await?,
+        None => crate::server::keys_json(&KeyPool::load(file.to_path_buf())?),
+    };
+    let Some(action) = action else {
+        if json {
+            println!("{}", serde_json::to_string_pretty(&current)?);
+        } else {
+            print!("{}", keys_table(&current, app.is_some()));
+        }
+        return Ok(());
+    };
+
+    let (service, edits, done) = match action {
+        KeysAction::Add { service, keys } => {
+            let have = key_slots(&current, &service).len();
+            let new = keys_to_add(&service, keys)?;
+            anyhow::ensure!(
+                have + new.len() <= MAX_KEYS_PER_SERVICE,
+                "{service} takes at most {MAX_KEYS_PER_SERVICE} keys and has {have}; \
+                 remove one first with `clipcut keys remove {service} <number>`"
+            );
+            let mut edits = vec![String::new(); have];
+            edits.extend(new);
+            (service, edits, None)
+        }
+        KeysAction::Remove { service, key } => {
+            let slots = key_slots(&current, &service);
+            let index = find_key(&service, slots, &key)?;
+            let hint = slots[index]["hint"].as_str().unwrap_or("****");
+            let edits = (0..slots.len())
+                .map(|i| if i == index { "__remove__" } else { "" }.to_string())
+                .collect();
+            let done = format!("Removed {service} key {} (…{hint}).", index + 1);
+            (service, edits, Some(done))
+        }
+        KeysAction::Clear { service } => {
+            let had = key_slots(&current, &service).len();
+            let done = match had {
+                0 => format!("{service} has no keys."),
+                1 => format!("Removed the {service} key."),
+                n => format!("Removed all {n} {service} keys."),
+            };
+            (service, Vec::new(), Some(done))
+        }
+    };
+    let before = key_slots(&current, &service).len();
+    let after = match &app {
+        Some(base) => {
+            let url = format!("{base}/keys/{service}");
+            api(reqwest::Method::PUT, &url, Some(json!({ "keys": edits }))).await?
+        }
+        None => {
+            let pool = KeyPool::load(file.to_path_buf())?;
+            let store = crate::server::edited_keys(pool.store(), &service, &edits)
+                .map_err(anyhow::Error::msg)?;
+            pool.replace(store)
+                .with_context(|| format!("could not write {}", file.display()))?;
+            crate::server::keys_json(&pool)
+        }
+    };
+    let slots = key_slots(&after, &service);
+    let done = done.unwrap_or_else(|| {
+        let added = slots.len().saturating_sub(before);
+        let given = edits.len() - before;
+        let mut line = match added {
+            0 => {
+                return format!(
+                    "{service} already has {}.",
+                    if given == 1 { "that key" } else { "those keys" }
+                );
+            }
+            1 => format!("Saved a {service} key."),
+            n => format!("Saved {n} {service} keys."),
+        };
+        if added < given {
+            line += &format!(" {} already saved.", given - added);
+        }
+        line
+    });
+    println!("{done}");
+    for (i, slot) in slots.iter().enumerate() {
+        print!("{}", slot_line(i + 1, slot, app.is_some()));
+    }
+    if app.is_some() {
+        println!("The running app uses the change from now on.");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // project ids
 
 /// Shortest start or end of an ID that `resolve_id` matches on.
@@ -3157,6 +3413,145 @@ mod tests {
         let mut listed: Vec<String> = CONFIG_KEYS.values.iter().map(|k| k.to_string()).collect();
         listed.sort();
         assert_eq!(listed, expected);
+    }
+
+    #[test]
+    fn key_services_name_every_known_service() {
+        let known: Vec<&str> = clipcut_core::keys::KNOWN_SERVICES
+            .iter()
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(KEY_SERVICES.values, known);
+    }
+
+    fn slots(hints: &[&str]) -> Vec<Value> {
+        hints
+            .iter()
+            .map(|h| json!({ "hint": h, "state": "ready" }))
+            .collect()
+    }
+
+    #[test]
+    fn keys_are_found_by_number_or_last_four_characters() {
+        let slots = slots(&["a1b2", "9f3c", "****"]);
+        assert_eq!(find_key("giphy", &slots, "1").unwrap(), 0);
+        assert_eq!(find_key("giphy", &slots, " 3 ").unwrap(), 2);
+        assert_eq!(find_key("giphy", &slots, "9f3c").unwrap(), 1);
+        assert_eq!(
+            find_key("giphy", &slots, "whole-secret-key-9f3c").unwrap(),
+            1
+        );
+        for missing in ["4", "0", "f3c", "zzzz", ""] {
+            let err = find_key("giphy", &slots, missing).unwrap_err().to_string();
+            assert!(err.contains("number (1–3)"), "{err}");
+        }
+        let err = find_key("giphy", &[], "1").unwrap_err().to_string();
+        assert_eq!(err, "giphy has no keys");
+        let twins = super::tests::slots(&["same", "same"]);
+        let err = find_key("giphy", &twins, "same").unwrap_err().to_string();
+        assert!(err.contains("2 giphy keys end in \"same\""), "{err}");
+    }
+
+    #[test]
+    fn keys_table_lists_every_service_masked_with_states_from_the_app() {
+        let keys = json!({ "services": [
+            { "id": "giphy", "label": "GIPHY", "slots": [
+                { "slot": 0, "hint": "a1b2", "state": "ready" },
+                { "slot": 1, "hint": "9f3c", "state": "invalid" },
+            ]},
+            { "id": "tenor", "label": "Tenor", "slots": [] },
+        ]});
+        assert_eq!(
+            keys_table(&keys, true),
+            "giphy     GIPHY\n  1  …a1b2  ready\n  2  …9f3c  rejected as invalid, skipped until you change it\n\
+             tenor     Tenor\n  no keys\n"
+        );
+        assert_eq!(
+            keys_table(&keys, false),
+            "giphy     GIPHY\n  1  …a1b2\n  2  …9f3c\ntenor     Tenor\n  no keys\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn keys_are_added_removed_and_cleared_in_keys_json_without_the_app() {
+        let home = crate::test_support::TestHome::new();
+        let file = home.0.join("keys.json");
+        let saved = || clipcut_core::keys::KeyStore::load(&file).unwrap().services;
+        let add = |service: &str, keys: &[&str]| KeysAction::Add {
+            service: service.into(),
+            keys: keys.iter().map(|k| k.to_string()).collect(),
+        };
+        keys_via(
+            &file,
+            None,
+            Some(add("giphy", &["first-key-0001", " second-key-0002 "])),
+            false,
+        )
+        .await
+        .unwrap();
+        // A key already saved is not added twice.
+        keys_via(
+            &file,
+            None,
+            Some(add("giphy", &["first-key-0001", "third-key-0003"])),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            saved()["giphy"],
+            ["first-key-0001", "second-key-0002", "third-key-0003"]
+        );
+        let err = keys_via(&file, None, Some(add("giphy", &["a1", "a2", "a3"])), false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("at most 5 keys and has 3"), "{err}");
+        let err = keys_via(&file, None, Some(add("freesound", &["k"])), false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("unknown service \"freesound\"; ClipCut takes keys for giphy"),
+            "{err}"
+        );
+        let err = keys_via(&file, None, Some(add("giphy", &["bad\u{7}key"])), false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("bad"), "{err}");
+
+        let remove = |key: &str| KeysAction::Remove {
+            service: "giphy".into(),
+            key: key.into(),
+        };
+        keys_via(&file, None, Some(remove("0002")), false)
+            .await
+            .unwrap();
+        keys_via(&file, None, Some(remove("1")), false)
+            .await
+            .unwrap();
+        assert_eq!(saved()["giphy"], ["third-key-0003"]);
+        keys_via(
+            &file,
+            None,
+            Some(add("pexels", &["pexels-key-1234"])),
+            false,
+        )
+        .await
+        .unwrap();
+        keys_via(
+            &file,
+            None,
+            Some(KeysAction::Clear {
+                service: "giphy".into(),
+            }),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved().keys().collect::<Vec<_>>(), ["pexels"]);
+        keys_via(&file, None, None, false).await.unwrap();
     }
 
     #[test]

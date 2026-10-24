@@ -69,6 +69,11 @@ follow [Semantic Versioning](https://semver.org/).
   description and hashtags, as the project page does, and says what to run
   to make the video again. With the app running the change goes through
   it.
+- `clipcut keys` lists the free API keys, masked, and adds, removes and
+  clears them as Settings → Keys does. A key can be pasted at a prompt or
+  piped in so it stays out of shell history. With the app running the
+  change goes through it, and the list shows which keys are resting after
+  a rate limit or were rejected.
 - `.srt` and `.vtt` caption files and a 1280×720 thumbnail with every
   render.
 - Docs for all of the above in Usage, Configuration, API, Architecture and
