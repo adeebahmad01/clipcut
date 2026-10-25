@@ -74,6 +74,11 @@ follow [Semantic Versioning](https://semver.org/).
   piped in so it stays out of shell history. With the app running the
   change goes through it, and the list shows which keys are resting after
   a rate limit or were rejected.
+- `clipcut voices` lists the narration voices that `--voice` and
+  `tts.voice` take, with the default marked, and `clipcut voices say
+  <voice>` writes a short WAV sample of one (or of a blend such as
+  `af_heart:0.6+am_michael:0.4`), saying which voice spoke if that one
+  isn't available. `--voice` now tab-completes the voice IDs.
 - `.srt` and `.vtt` caption files and a 1280×720 thumbnail with every
   render.
 - Docs for all of the above in Usage, Configuration, API, Architecture and
