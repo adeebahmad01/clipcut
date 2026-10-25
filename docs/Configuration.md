@@ -146,7 +146,7 @@ To use a SearXNG you already run, set `searxng_url` to it, set
 | Key | Default | Meaning |
 |---|---|---|
 | `engine` | `"kokoro"` | `kokoro` (local neural voice), `espeak` (robotic fallback) or `command` |
-| `voice` | `"am_michael"` | Kokoro voice ID, such as `af_heart`, `bm_george` or `bf_emma` |
+| `voice` | `"am_michael"` | Kokoro voice ID, such as `af_heart`, `bm_george` or `bf_emma`, or a blend like `af_heart:0.6+am_michael:0.4`. `clipcut voices` lists them |
 | `speed` | `1.1` | Speaking rate, 0.5–2.0 |
 | `command` | `""` | For `engine = "command"`: a shell command that reads `{text_file}` and writes a WAV to `{out_wav}` |
 

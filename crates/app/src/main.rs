@@ -61,7 +61,8 @@ enum Command {
         /// Target length in seconds (10–600).
         #[arg(long)]
         seconds: Option<u32>,
-        #[arg(long)]
+        /// Narration voice; `clipcut voices` lists them. Default: tts.voice in config.toml.
+        #[arg(long, value_parser = cli::VOICES, hide_possible_values = true)]
         voice: Option<String>,
     },
     /// Continue or re-run a project: `clipcut run <id> --from assets`.
@@ -241,6 +242,15 @@ enum Command {
         #[command(subcommand)]
         action: Option<cli::KeysAction>,
         /// Print the keys, masked, as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the narration voices, or hear one: `clipcut voices say bf_emma`.
+    #[command(args_conflicts_with_subcommands = true)]
+    Voices {
+        #[command(subcommand)]
+        action: Option<cli::VoicesAction>,
+        /// Print the voices as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -428,6 +438,7 @@ async fn main() -> anyhow::Result<()> {
             geo,
             limit,
         } => cli::ideas(&state, news, q, &geo, limit).await,
+        Command::Voices { action, json } => cli::voices(&state, action, json).await,
         Command::Doctor => {
             let checks = doctor::checks(&state).await;
             for c in &checks {
@@ -611,6 +622,8 @@ mod tests {
                 "completions",
                 "config",
                 "keys",
+                "voices",
+                "bf_emma",
                 "hormozi",
                 "unlisted",
                 "searxng",
