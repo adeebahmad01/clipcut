@@ -1282,8 +1282,8 @@ pub struct EditOpts {
     /// Target length in seconds (10–600).
     #[arg(long)]
     pub seconds: Option<u32>,
-    /// Narration voice; "" goes back to the one in the settings.
-    #[arg(long)]
+    /// Narration voice (see `clipcut voices`); "" goes back to the one in the settings.
+    #[arg(long, value_parser = VOICES, hide_possible_values = true)]
     pub voice: Option<String>,
     /// Replace the narration with this file's text, or `-` for stdin.
     #[arg(long, value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
@@ -2413,6 +2413,166 @@ async fn keys_via(
 }
 
 // ---------------------------------------------------------------------------
+// voices
+
+/// The voice IDs `--voice` and `clipcut voices say` complete; a test checks
+/// them against the TTS catalog. Other Kokoro IDs and blends work too.
+pub const VOICES: OneOf<String> = OneOf::hint(&[
+    "af_heart",
+    "af_bella",
+    "af_nicole",
+    "af_aoede",
+    "af_kore",
+    "af_sarah",
+    "af_nova",
+    "af_sky",
+    "af_alloy",
+    "af_jessica",
+    "af_river",
+    "am_michael",
+    "am_fenrir",
+    "am_puck",
+    "am_echo",
+    "am_eric",
+    "am_liam",
+    "am_onyx",
+    "am_santa",
+    "am_adam",
+    "bf_emma",
+    "bf_isabella",
+    "bf_alice",
+    "bf_lily",
+    "bm_george",
+    "bm_fable",
+    "bm_lewis",
+    "bm_daniel",
+    "en-us+m3",
+    "en-us+f3",
+    "en-us+m7",
+    "en-gb+m3",
+    "en-gb+f3",
+]);
+
+#[derive(clap::Subcommand, Debug, Clone)]
+pub enum VoicesAction {
+    /// Write a short sample of a voice to a WAV file: `clipcut voices say bf_emma`.
+    Say {
+        /// A voice from `clipcut voices`, or a Kokoro blend such as af_heart:0.6+am_michael:0.4.
+        #[arg(value_parser = VOICES, hide_possible_values = true)]
+        voice: String,
+        /// What to say; default: a short sample sentence.
+        text: Vec<String>,
+        /// Where to write the WAV; default: voice-<voice>.wav here.
+        #[arg(long, short, value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
+        out: Option<PathBuf>,
+    },
+}
+
+/// What `clipcut voices` prints: the voices by engine with the one in the
+/// settings marked, then what the configured engine does with them.
+pub fn voices_table(
+    voices: &[clipcut_tts::VoiceInfo],
+    default: &str,
+    health: &clipcut_tts::TtsHealth,
+) -> String {
+    let mut out = String::new();
+    for (engine, title) in [
+        ("kokoro", "Kokoro, the local neural voice"),
+        ("espeak", "eSpeak, the robotic fallback"),
+    ] {
+        out += &format!("{title}:\n");
+        for v in voices.iter().filter(|v| v.engine == engine) {
+            let mark = if v.id == default { "  default" } else { "" };
+            out += &format!("  {:<12} {}{mark}\n", v.id, v.label);
+        }
+    }
+    if !voices.iter().any(|v| v.id == default) {
+        out += &format!("Default: {default}\n");
+    }
+    match health.engine.as_str() {
+        "command" => {
+            out += "tts.engine is command, so your tts.command speaks and the voice is ignored.\n"
+        }
+        "espeak" | "espeak-ng" => {
+            out += "tts.engine is espeak, so Kokoro voices are read by the closest eSpeak voice.\n"
+        }
+        _ if !health.ready => out += &format!("Not ready: {}\n", health.detail),
+        _ => {}
+    }
+    out += "\nBlend Kokoro voices with +, such as af_heart:0.6+am_michael:0.4.\n\
+            Hear one: clipcut voices say bf_emma\n\
+            Use one: clipcut new \"…\" --voice bf_emma, or clipcut config set tts.voice bf_emma\n";
+    out
+}
+
+/// Where `clipcut voices say` writes when not told: voice-<voice>.wav, with
+/// a blend's `+` and `:` turned into `-`.
+pub fn sample_path(voice: &str) -> PathBuf {
+    let name: String = voice
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    PathBuf::from(format!("voice-{name}.wav"))
+}
+
+/// `clipcut voices`: list the voices, or write a sample of one.
+pub async fn voices(
+    state: &AppState,
+    action: Option<VoicesAction>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let tts = state.services().tts;
+    let Some(VoicesAction::Say { voice, text, out }) = action else {
+        let voices = tts.voices();
+        let default = tts.config.tts.voice.trim().to_string();
+        let health = tts.health();
+        if json {
+            let value = json!({
+                "default": default,
+                "engine": health.engine,
+                "ready": health.ready,
+                "detail": health.detail,
+                "voices": voices,
+            });
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        } else {
+            print!("{}", voices_table(&voices, &default, &health));
+        }
+        return Ok(());
+    };
+    let voice = voice.trim();
+    anyhow::ensure!(
+        !voice.is_empty() && voice.len() <= 128,
+        "voice must be 1–128 bytes"
+    );
+    let text = text.join(" ");
+    let text = match text.trim() {
+        "" => clipcut_tts::PREVIEW_TEXT,
+        text => text,
+    };
+    anyhow::ensure!(text.len() <= 500, "the text must be at most 500 bytes");
+    let out = out.unwrap_or_else(|| sample_path(voice));
+    let used = tts
+        .preview(text, voice, &out)
+        .await
+        .with_context(|| format!("could not voice a sample with {voice}"))?;
+    // A tts.command speaks in its own voice, so there's nothing to compare.
+    let command = tts.config.tts.engine.trim().eq_ignore_ascii_case("command");
+    if used != voice && !command {
+        eprintln!("{voice} isn't available, so {used} spoke instead; `clipcut voices` lists them.");
+    }
+    println!("{}", out.display());
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // project ids
 
 /// Shortest start or end of an ID that `resolve_id` matches on.
@@ -3413,6 +3573,115 @@ mod tests {
         let mut listed: Vec<String> = CONFIG_KEYS.values.iter().map(|k| k.to_string()).collect();
         listed.sort();
         assert_eq!(listed, expected);
+    }
+
+    #[test]
+    fn voices_complete_every_listed_voice() {
+        let listed: Vec<&str> = clipcut_tts::voices::KOKORO_VOICES
+            .iter()
+            .chain(clipcut_tts::voices::ESPEAK_VOICES)
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(VOICES.values, listed);
+    }
+
+    fn voice_list() -> Vec<clipcut_tts::VoiceInfo> {
+        [
+            ("af_heart", "Heart (US female)", "kokoro"),
+            ("bf_emma", "Emma (UK female)", "kokoro"),
+            ("en-us+m3", "eSpeak US male", "espeak"),
+        ]
+        .map(|(id, label, engine)| clipcut_tts::VoiceInfo {
+            id: id.into(),
+            label: label.into(),
+            engine: engine.into(),
+        })
+        .to_vec()
+    }
+
+    fn health(engine: &str, ready: bool) -> clipcut_tts::TtsHealth {
+        clipcut_tts::TtsHealth {
+            engine: engine.into(),
+            ready,
+            detail: "Kokoro model not downloaded yet".into(),
+        }
+    }
+
+    #[test]
+    fn voices_table_marks_the_default_and_says_what_the_engine_does() {
+        let voices = voice_list();
+        let table = voices_table(&voices, "bf_emma", &health("kokoro", true));
+        assert!(
+            table.starts_with(
+                "Kokoro, the local neural voice:\n  af_heart     Heart (US female)\n  \
+                 bf_emma      Emma (UK female)  default\neSpeak, the robotic fallback:\n  \
+                 en-us+m3     eSpeak US male\n\nBlend"
+            ),
+            "{table}"
+        );
+        assert!(table.contains("clipcut voices say bf_emma"), "{table}");
+
+        let blend = voices_table(&voices, "af_heart+bf_emma", &health("kokoro", false));
+        assert!(!blend.contains("default\n"), "{blend}");
+        assert!(blend.contains("Default: af_heart+bf_emma\n"), "{blend}");
+        assert!(
+            blend.contains("Not ready: Kokoro model not downloaded yet\n"),
+            "{blend}"
+        );
+
+        let espeak = voices_table(&voices, "bf_emma", &health("espeak", true));
+        assert!(espeak.contains("closest eSpeak voice"), "{espeak}");
+        let command = voices_table(&voices, "bf_emma", &health("command", true));
+        assert!(command.contains("the voice is ignored"), "{command}");
+        assert!(!command.contains("Not ready"), "{command}");
+    }
+
+    #[test]
+    fn samples_are_named_after_their_voice() {
+        assert_eq!(sample_path("bf_emma"), PathBuf::from("voice-bf_emma.wav"));
+        assert_eq!(
+            sample_path(" af_heart:0.6+am_michael:0.4 "),
+            PathBuf::from("voice-af_heart-0.6-am_michael-0.4.wav")
+        );
+        assert_eq!(sample_path("../x"), PathBuf::from("voice-..-x.wav"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn voices_say_writes_a_sample_with_the_configured_engine() {
+        let home = crate::test_support::TestHome::new();
+        let tone: Vec<f32> = (0..24_000)
+            .map(|i| (i as f32 * 220.0 * std::f32::consts::TAU / 24_000.0).sin() * 0.3)
+            .collect();
+        let fixture = home.0.join("tone.wav");
+        clipcut_tts::audio::write_wav(&fixture, &tone, 24_000).unwrap();
+        let mut config = Config::default();
+        config.tts.engine = "command".into();
+        config.tts.command = format!("cp '{}' {{out_wav}} # {{text_file}}", fixture.display());
+        config.search.manage_searxng = false;
+        config.save(&home.0.join("config.toml")).unwrap();
+        let state = AppState::load(Paths {
+            home: home.0.clone(),
+        })
+        .unwrap();
+
+        let out = home.0.join("sample.wav");
+        let say = |text: &str| VoicesAction::Say {
+            voice: "bf_emma".into(),
+            text: text.split_whitespace().map(str::to_string).collect(),
+            out: Some(out.clone()),
+        };
+        voices(&state, Some(say("")), false).await.unwrap();
+        let (samples, rate) = clipcut_tts::audio::read_wav(&out).unwrap();
+        assert_eq!(rate, 24_000);
+        assert!(!samples.is_empty());
+
+        let err = voices(&state, Some(say(&"word ".repeat(120))), false)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("at most 500 bytes"), "{err}");
+        let err = voices(&state, Some(say("...")), false).await.unwrap_err();
+        assert!(format!("{err:#}").contains("could not voice"), "{err:#}");
     }
 
     #[test]

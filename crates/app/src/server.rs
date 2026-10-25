@@ -472,7 +472,7 @@ async fn voice_preview(
         .try_acquire_owned()
         .map_err(|_| ApiError::conflict("voice previews are busy; try again shortly"))?;
     let text = if body.text.trim().is_empty() {
-        "The train leaves at nine. We have time for a cup of coffee."
+        clipcut_tts::PREVIEW_TEXT
     } else {
         body.text.trim()
     };
