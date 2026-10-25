@@ -26,6 +26,8 @@ pub use normalize::normalize;
 pub const DEFAULT_VOICE: &str = "am_michael";
 /// Default espeak-ng fallback voice.
 pub const DEFAULT_ESPEAK_VOICE: &str = "en-us+m3";
+/// What a voice preview says when not given any text.
+pub const PREVIEW_TEXT: &str = "The train leaves at nine. We have time for a cup of coffee.";
 
 #[derive(Clone)]
 pub struct Tts {
@@ -204,15 +206,18 @@ impl Tts {
         self.finish(rendered, &engine, &voice_id, project_dir, out_wav)
     }
 
-    /// Short sample for the settings page.
-    pub async fn preview(&self, text: &str, voice: &str, out_wav: &Path) -> anyhow::Result<()> {
+    /// Short sample for the settings page and `clipcut voices say`. Returns
+    /// the voice that spoke, which differs from `voice` when that one isn't
+    /// available.
+    pub async fn preview(&self, text: &str, voice: &str, out_wav: &Path) -> anyhow::Result<String> {
         let sentences = split_sentences(text);
         anyhow::ensure!(!sentences.is_empty(), "nothing to say");
         let progress = Progress::log_only("tts-preview");
         let dir = out_wav.parent().unwrap_or(Path::new("."));
-        self.synthesize(&sentences, Some(voice), dir, out_wav, &progress)
+        let track = self
+            .synthesize(&sentences, Some(voice), dir, out_wav, &progress)
             .await?;
-        Ok(())
+        Ok(track.voice)
     }
 
     fn finish(

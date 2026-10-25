@@ -562,14 +562,34 @@ saved isn't added twice. When the app is running, the change goes through
 it and it uses the keys straight away, and `clipcut keys` also shows which
 keys are resting after a rate limit and which were rejected as invalid.
 
+### Listing and hearing voices
+
+`clipcut voices` lists the narration voices that `--voice` and `tts.voice`
+take, marking the one in your settings, and says if Kokoro isn't ready yet.
+`clipcut voices say` writes a short sample to a WAV file, as the preview
+button next to the app's voice pickers plays one, so you can hear a voice
+before using it:
+
+```bash
+clipcut voices                               # every voice, with the default marked
+clipcut voices say bf_emma                   # writes voice-bf_emma.wav here
+clipcut voices say bm_george "Your own line." -o george.wav
+clipcut voices say af_heart:0.6+am_michael:0.4  # try a blend
+clipcut voices --json                        # the list, the default and whether the engine is ready
+```
+
+If the voice isn't available, it says which voice spoke instead. The
+first Kokoro sample downloads the model if it isn't there yet.
+
 ### Shell completions
 
 `clipcut completions <shell>` prints a completion script for bash, zsh,
 fish, elvish or PowerShell. Tab then completes commands and options, and
 the values of `--from`, `--format`, `--also`, `--captions`, `--privacy`,
-`--publish` and `setup`. In bash and zsh it also completes setting names
-after `clipcut config get`, `set` and `unset`, and service names after
-`clipcut keys add`, `remove` and `clear`. Save it where your shell looks for completions,
+`--publish`, `--voice` and `setup`. In bash and zsh it also completes setting names
+after `clipcut config get`, `set` and `unset`, service names after
+`clipcut keys add`, `remove` and `clear`, and voices after
+`clipcut voices say`. Save it where your shell looks for completions,
 then open a new terminal:
 
 ```bash
@@ -636,10 +656,11 @@ Volumes are in **Settings → Audio** or the `[audio]` section of
 ## Voices
 
 ClipCut uses [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M), which
-runs on your CPU. The app lists the main voices; any Kokoro voice ID works
-in `tts.voice` or `--voice`, such as `af_heart`, `af_bella`, `am_adam`,
-`bm_george` or `bf_emma`. Names starting with `a` are American English,
-`b` British English.
+runs on your CPU. The app and [`clipcut voices`](#listing-and-hearing-voices) list the main
+voices; any Kokoro voice ID works in `tts.voice` or `--voice`, such as
+`af_heart`, `af_bella`, `am_adam`, `bm_george` or `bf_emma`. Names
+starting with `a` are American English, `b` British English. Join voices
+with `+` to blend them, optionally weighted: `af_heart:0.6+am_michael:0.4`.
 
 If Kokoro is not available, eSpeak gives a robotic but working voice. To
 use another TTS program, see [tts.command](Configuration.md#tts).
