@@ -52,6 +52,7 @@ struct Web;
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/status", get(status))
+        .route("/status/qr.svg", get(status_qr))
         .route("/config", get(get_config).put(put_config))
         .route("/keys", get(get_keys))
         .route("/keys/{service}", put(put_keys))
@@ -348,11 +349,27 @@ async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "home": state.paths.home,
-        "network_url": crate::net::network_url(state.bound_port()),
+        "network_url": state.network_url(),
         "tools": state.services().tools,
         "ready": doctor::ready(&checks),
         "checks": checks,
     }))
+}
+
+/// The Network URL as a QR code, for opening the app on a phone.
+async fn status_qr(State(state): State<AppState>) -> ApiResult<Response> {
+    let url = state
+        .network_url()
+        .ok_or_else(|| ApiError::not_found("ClipCut is not listening on the network"))?;
+    let svg = crate::qr::Qr::new(&url)?.svg();
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/svg+xml"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        svg,
+    )
+        .into_response())
 }
 
 async fn get_config(State(state): State<AppState>) -> Json<Config> {
@@ -2054,6 +2071,34 @@ mod tests {
         assert_eq!(state.keys.store().services["giphy"], ["abc"]);
         let response = call(&state, "PUT", "/api/keys/freesound", json!({"keys": []})).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn loopback_binds_report_no_network_url_or_qr_code() {
+        let home = TestHome::new();
+        let state = home.state();
+        for host in ["127.0.0.1", "::1", "localhost"] {
+            state.set_bound_host(host);
+            let status = response_json(call(&state, "GET", "/api/status", json!(null)).await).await;
+            assert!(status["network_url"].is_null(), "{host}: {status}");
+            let response = call(&state, "GET", "/api/status/qr.svg", json!(null)).await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{host}");
+        }
+        state.set_bound_host("192.168.100.226");
+        let status = response_json(call(&state, "GET", "/api/status", json!(null)).await).await;
+        assert_eq!(status["network_url"], "http://192.168.100.226:7878");
+        let response = call(&state, "GET", "/api/status/qr.svg", json!(null)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "image/svg+xml");
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            body,
+            crate::qr::Qr::new("http://192.168.100.226:7878")
+                .unwrap()
+                .svg()
+        );
     }
 
     #[tokio::test]

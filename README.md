@@ -91,9 +91,15 @@ clipcut
   Local:   http://localhost:7878
   Network: http://192.168.1.20:7878
   Data:    ~/.local/share/clipcut
+
+  Scan to open ClipCut on your phone:
+
+  (a QR code of the Network URL)
 ```
 
-Open either URL. The Network URL works from your phone on the same Wi-Fi.
+Open either URL. The Network URL works from your phone on the same Wi-Fi:
+scan the QR code printed under it with the phone's camera (`--no-qr` skips
+it), or the one under **Settings → Setup**.
 If Chromium is installed, an app window opens too (`--no-window` skips it).
 
 Check that every piece is in place:

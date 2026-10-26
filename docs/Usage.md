@@ -20,12 +20,20 @@ clipcut
 ```
 
 ClipCut prints a Local and a Network URL. The Network URL lets you use the
-app from a phone or another computer on the same network. If Chromium or
-Chrome is installed, ClipCut also opens the app in its own window.
+app from a phone or another computer on the same network. Under it is a QR
+code of that URL: point your phone's camera at it to open the app without
+typing the address. **Settings → Setup** shows the same code on a computer's
+screen. If Chromium or Chrome is installed, ClipCut also opens the app in its
+own window.
+
+The QR code is left out when the output isn't a terminal (a service or a
+log file), when `NO_COLOR` is set, and when ClipCut only listens on this
+machine, where the Network line says "not exposed".
 
 | Option | Effect |
 |---|---|
 | `--no-window` | Don't open the app window |
+| `--no-qr` | Don't print the QR code of the Network URL |
 | `--port 9000` | Listen on another port (default 7878) |
 | `--host 127.0.0.1` | Only accept connections from this machine |
 | `--home PATH` | Keep data somewhere else (also `$CLIPCUT_HOME`) |

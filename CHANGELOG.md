@@ -79,6 +79,13 @@ follow [Semantic Versioning](https://semver.org/).
   <voice>` writes a short WAV sample of one (or of a blend such as
   `af_heart:0.6+am_michael:0.4`), saying which voice spoke if that one
   isn't available. `--voice` now tab-completes the voice IDs.
+- `clipcut` prints a QR code of the Network URL under it, so a phone's
+  camera opens the app without typing the address, and Settings → Setup
+  shows the same code on a computer (`GET /api/status/qr.svg`). `--no-qr`
+  leaves it out, as does output that isn't a terminal. When the app only
+  listens on `::1` or another loopback address, the Network line now says
+  "not exposed" and `/api/status` returns no `network_url`, and a specific
+  `--host` address is shown as it is instead of the guessed LAN address.
 - `.srt` and `.vtt` caption files and a 1280×720 thumbnail with every
   render.
 - Docs for all of the above in Usage, Configuration, API, Architecture and
