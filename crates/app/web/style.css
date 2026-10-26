@@ -952,6 +952,10 @@ main.enter .page { animation: page-in 0.28s var(--ease); }
 .setup-progress { display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
 .setup-progress > span { display: inline-flex; align-items: center; gap: 8px; color: var(--accent); }
 .setup-log p { display: flex; align-items: center; gap: 6px; }
+.phone-qr { padding: 16px; display: flex; align-items: center; gap: 18px; }
+.phone-qr img { flex: none; border-radius: 6px; background: #fff; }
+.phone-qr h2 { margin-bottom: 4px; }
+.phone-qr p { margin-bottom: 8px; }
 .foot-note { margin-top: 4px; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 
 .services { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 520px), 1fr)); gap: 14px; }
@@ -1278,6 +1282,8 @@ main.enter .page { animation: page-in 0.28s var(--ease); }
   .cand-meta a { min-width: 44px; min-height: 44px; align-items: center; justify-content: center; }
   .also-opt, .idea { min-height: 44px; }
   .idea { line-height: 30px; }
+  /* Scanning your own screen is no use on a phone. */
+  .phone-qr { display: none; }
 }
 
 @media (max-width: 480px) {

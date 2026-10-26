@@ -7,6 +7,7 @@ mod doctor;
 mod net;
 mod pipeline;
 mod publish;
+mod qr;
 mod queue;
 mod server;
 mod state;
@@ -46,6 +47,9 @@ enum Command {
         /// Don't open the app window.
         #[arg(long)]
         no_window: bool,
+        /// Don't print a QR code of the Network URL.
+        #[arg(long)]
+        no_qr: bool,
         #[arg(long)]
         port: Option<u16>,
         #[arg(long)]
@@ -315,14 +319,27 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState::load(Paths::resolve(cli.home))?;
     match command.unwrap_or(Command::Serve {
         no_window: false,
+        no_qr: false,
         port: None,
         host: None,
     }) {
         Command::Serve {
             no_window,
+            no_qr,
             port,
             host,
-        } => serve(state, no_window, port, host).await,
+        } => {
+            serve(
+                state,
+                ServeOpts {
+                    no_window,
+                    no_qr,
+                    port,
+                    host,
+                },
+            )
+            .await
+        }
         Command::New {
             topic,
             notes,
@@ -529,12 +546,20 @@ async fn run_headless(
     Ok(())
 }
 
-async fn serve(
-    state: AppState,
+struct ServeOpts {
     no_window: bool,
+    no_qr: bool,
     port: Option<u16>,
     host: Option<String>,
-) -> anyhow::Result<()> {
+}
+
+async fn serve(state: AppState, opts: ServeOpts) -> anyhow::Result<()> {
+    let ServeOpts {
+        no_window,
+        no_qr,
+        port,
+        host,
+    } = opts;
     let config = state.config();
     let host = host.unwrap_or(config.server.host.clone());
     let port = port.unwrap_or(config.server.port);
@@ -545,6 +570,7 @@ async fn serve(
         })?;
     let port = listener.local_addr()?.port();
     state.set_bound_port(port);
+    state.set_bound_host(&host);
 
     pipeline::recover_interrupted(&state).await;
     let queue_handle = tokio::spawn(queue::worker(state.clone(), false));
@@ -557,11 +583,24 @@ async fn serve(
     let local = format!("http://localhost:{port}");
     println!("\n  ClipCut {} is running\n", env!("CARGO_PKG_VERSION"));
     println!("  Local:   {local}");
-    match net::network_url(port) {
-        Some(url) if host != "127.0.0.1" && host != "localhost" => println!("  Network: {url}"),
-        _ => println!("  Network: (not exposed; listening on {host})"),
+    let network = state.network_url();
+    match &network {
+        Some(url) => println!("  Network: {url}"),
+        None => println!("  Network: (not exposed; listening on {host})"),
     }
     println!("  Data:    {}\n", state.paths.home.display());
+    if let Some(url) = network.filter(|_| !no_qr && show_qr()) {
+        match qr::Qr::new(&url) {
+            Ok(code) => {
+                println!("  Scan to open ClipCut on your phone:\n");
+                for line in code.terminal() {
+                    println!("  {line}");
+                }
+                println!();
+            }
+            Err(e) => tracing::warn!("could not draw the QR code: {e}"),
+        }
+    }
 
     if config.server.open_window && !no_window {
         if let Some(chromium) = state.services().tools.chromium {
@@ -591,6 +630,14 @@ async fn serve(
         })
         .await?;
     Ok(())
+}
+
+/// Only draw the QR code for a person at a terminal that understands colors.
+fn show_qr() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdout().is_terminal()
+        && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty())
+        && std::env::var("TERM").map_or(true, |t| t != "dumb")
 }
 
 #[cfg(test)]

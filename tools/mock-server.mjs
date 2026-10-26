@@ -736,6 +736,12 @@ async function api(req, res, url) {
     req.on('close', () => clients.delete(res));
     return;
   }
+  // The real server draws a QR code of the Network URL; this is a stand-in with its corner squares.
+  if (a === 'status' && id === 'qr.svg') {
+    const finder = (x, y) => `<path d="M${x} ${y}h7v7h-7zM${x + 1} ${y + 1}v5h5v-5zM${x + 2} ${y + 2}h3v3h-3z" fill-rule="evenodd"/>`;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 33 33" shape-rendering="crispEdges"><rect width="33" height="33" fill="#fff"/><g fill="#000">${finder(4, 4)}${finder(22, 4)}${finder(4, 22)}<text x="16.5" y="19" font-size="4" text-anchor="middle" font-family="monospace">mock</text></g></svg>`;
+    return sendBuf(req, res, Buffer.from(svg), 'image/svg+xml', { 'cache-control': 'no-store' });
+  }
   if (a === 'status') return json(res, 200, statusView());
   if (a === 'config') {
     if (M === 'GET') return json(res, 200, config);
