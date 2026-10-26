@@ -2664,8 +2664,12 @@ function SettingsView(initialTab) {
             h('ol', { class: 'log compact' }, su.log.slice(-12).reverse().map((l) => h('li', { class: `lvl-${l.level}` },
               h('time', null, new Date(l.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })),
               h('span', { class: 'log-msg' }, l.message))))) : null),
-        h('p', { class: 'muted sm foot-note' }, `ClipCut ${s.version} · data in `, h('code', null, s.home),
-          s.network_url ? [' · open on your phone at ', h('a', { class: 'link', href: s.network_url }, s.network_url)] : null),
+        s.network_url ? h('div', { class: 'phone-qr card' },
+          h('img', { src: `/api/status/qr.svg?url=${encodeURIComponent(s.network_url)}`, alt: `QR code of ${s.network_url}`, width: 132, height: 132 }),
+          h('div', null, h('h2', null, 'Open on your phone'),
+            h('p', { class: 'muted' }, 'Scan this with the camera of a phone on the same Wi-Fi to open ClipCut there.'),
+            h('a', { class: 'link', href: s.network_url }, s.network_url))) : null,
+        h('p', { class: 'muted sm foot-note' }, `ClipCut ${s.version} · data in `, h('code', null, s.home)),
       ];
     });
   }

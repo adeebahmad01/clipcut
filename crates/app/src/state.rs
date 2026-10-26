@@ -57,6 +57,7 @@ pub struct Inner {
     pub preview_slots: Arc<Semaphore>,
     pub still_slots: Arc<Semaphore>,
     bound_port: AtomicU16,
+    bound_host: RwLock<String>,
 }
 
 /// Release claims even if a request or pipeline future is cancelled.
@@ -104,6 +105,7 @@ impl AppState {
             queue,
             publish,
             bound_port: AtomicU16::new(config.server.port),
+            bound_host: RwLock::new(config.server.host.clone()),
             config: RwLock::new(config),
             services: RwLock::new(services),
             busy_beats: Mutex::new(Default::default()),
@@ -195,6 +197,15 @@ impl AppState {
 
     pub fn bound_port(&self) -> u16 {
         self.bound_port.load(Ordering::Relaxed)
+    }
+
+    pub fn set_bound_host(&self, host: &str) {
+        *self.bound_host.write().unwrap() = host.to_string();
+    }
+
+    /// Where other devices reach the app; None when it only listens on loopback.
+    pub fn network_url(&self) -> Option<String> {
+        crate::net::network_url(&self.bound_host.read().unwrap(), self.bound_port())
     }
 }
 

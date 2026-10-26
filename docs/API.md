@@ -13,6 +13,7 @@ snake_case strings). Errors are `{"error": "message"}` with a 4xx/5xx status.
 | Method | Path | Body | Response |
 |---|---|---|---|
 | GET | `/api/status` | – | `Status` (below) |
+| GET | `/api/status/qr.svg` | – | The Network URL as a QR code (`image/svg+xml`); 404 when the app only listens on loopback |
 | GET | `/api/config` | – | `Config` |
 | PUT | `/api/config` | `Config` (full object) | `Config` (as saved) |
 | GET | `/api/keys` | – | `{ services: [{ id, label, slots: [{ slot, hint, state }] }] }` with `state` = `ready`, `cooling_down` or `invalid`. All `KNOWN_SERVICES` are listed, including ones with no keys. |
@@ -33,6 +34,10 @@ snake_case strings). Errors are `{"error": "message"}` with a 4xx/5xx status.
   "ready": true
 }
 ```
+
+`network_url` is the address other devices open, or `null` when the app
+listens on a loopback host (`127.0.0.1`, `::1`, `localhost`). A specific
+`host` is used as it is; `0.0.0.0` and `::` use the machine's LAN address.
 
 `checks` covers tools, the TTS engine, the LLM CLI, search (SearXNG/DDG) and
 keys. A failing check carries a `fix` string: a command or a hint, which may
