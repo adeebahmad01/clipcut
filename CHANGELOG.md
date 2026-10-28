@@ -86,6 +86,13 @@ follow [Semantic Versioning](https://semver.org/).
   listens on `::1` or another loopback address, the Network line now says
   "not exposed" and `/api/status` returns no `network_url`, and a specific
   `--host` address is shown as it is instead of the guessed LAN address.
+- `clipcut beats <id>` lists a project's beat sheet: each beat's time,
+  visual kind, status, source and narration, with any errors (`--json` for
+  scripts). `lock` and `unlock` choose which visuals `clipcut run --from
+  assets` keeps, and `redo` finds a new visual for single beats now,
+  optionally with another `--kind` or `--query`. With the app running the
+  changes go through it. Locking or unlocking a beat in the app no longer
+  clears the rendered video.
 - `.srt` and `.vtt` caption files and a 1280×720 thumbnail with every
   render.
 - Docs for all of the above in Usage, Configuration, API, Architecture and

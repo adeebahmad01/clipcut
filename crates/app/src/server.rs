@@ -1091,6 +1091,8 @@ async fn patch_beat(
     if let Some(visual) = &body.visual {
         validate_visual(visual)?;
     }
+    // Locking only says what a visuals rerun keeps; the video stays as it is.
+    let video_changed = body.text.is_some() || body.visual.is_some();
     let (_, (updated, old)) = state
         .store
         .update(&id, |p| {
@@ -1133,7 +1135,9 @@ async fn patch_beat(
                 script.sentences = sentences;
                 pipeline::reset_from(p, Stage::Voice);
             }
-            pipeline::reset_from(p, Stage::Render);
+            if video_changed {
+                pipeline::reset_from(p, Stage::Render);
+            }
             pipeline::refresh_assets_status(p);
             let updated = p.beats.iter().find(|b| b.id == beat).unwrap().clone();
             Ok((updated, old))
@@ -2267,6 +2271,31 @@ mod tests {
         assert!(revised.voice_track.is_none());
         assert!(revised.render.is_none());
         assert_eq!(revised.beats[0].end_s, 0.0);
+    }
+
+    #[tokio::test]
+    async fn locking_a_beat_keeps_the_render() {
+        let home = TestHome::new();
+        let state = home.state();
+        let project = state.store.create(finished_project()).await.unwrap();
+        let path = format!("/api/projects/{}/beats/b01", project.id);
+        let response = call(&state, "PATCH", &path, json!({"locked": true})).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let locked = state.store.get(&project.id).unwrap();
+        assert!(locked.beats[0].locked);
+        assert!(locked.render.is_some());
+        let render = locked
+            .stages
+            .iter()
+            .find(|s| s.stage == Stage::Render)
+            .unwrap();
+        assert_eq!(render.status, clipcut_core::Status::Done);
+
+        let mut visual = locked.beats[0].visual.clone();
+        visual.on_screen_text = Some("New words".into());
+        let response = call(&state, "PATCH", &path, json!({"visual": visual})).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(state.store.get(&project.id).unwrap().render.is_none());
     }
 
     #[tokio::test]
