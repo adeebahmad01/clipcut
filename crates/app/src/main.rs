@@ -138,6 +138,16 @@ enum Command {
         #[command(flatten)]
         edit: cli::EditOpts,
     },
+    /// List a project's beats and their visuals, or lock or redo some: `clipcut beats 3fa9c1 redo 4`.
+    Beats {
+        /// Project ID, its last few characters, or `latest`.
+        id: String,
+        #[command(subcommand)]
+        action: Option<cli::BeatsAction>,
+        /// Print the beats as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Make one video per line of a text file (blank and # lines are skipped).
     Batch {
         #[arg(value_hint = ValueHint::FilePath)]
@@ -388,6 +398,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Duplicate { id } => cli::duplicate(&state, &id).await,
         Command::Stop { ids, force } => cli::stop(&state, cli::StopArgs { ids, force }).await,
         Command::Edit { id, edit } => cli::edit(&state, &id, edit).await,
+        Command::Beats { id, action, json } => cli::beats(&state, &id, action, json).await,
         Command::Batch {
             file,
             publish,
@@ -670,6 +681,7 @@ mod tests {
                 "config",
                 "keys",
                 "voices",
+                "beats",
                 "bf_emma",
                 "hormozi",
                 "unlisted",
@@ -715,6 +727,11 @@ mod tests {
         lists_all(&STAGES, &Stage::ALL);
         lists_all(&cli::FORMATS, &Format::ALL);
         lists_all(&cli::CAPTIONS, &clipcut_core::timeline::CaptionPreset::ALL);
+        use clipcut_core::VisualKind::*;
+        lists_all(
+            &cli::VISUAL_KINDS,
+            &[Youtube, Article, Meme, Gif, Image, Stock, Text],
+        );
     }
 
     #[test]
@@ -806,5 +823,45 @@ mod tests {
             Some(Command::Stop { ids, force: true }) if ids == ["3fa9c1", "latest"]
         ));
         assert!(Cli::try_parse_from(["clipcut", "stop"]).is_err());
+
+        let cli = Cli::try_parse_from(["clipcut", "beats", "3fa9c1", "lock", "2", "4-6"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Beats { id, action: Some(cli::BeatsAction::Lock { beats }), json: false })
+                if id == "3fa9c1" && beats == ["2", "4-6"]
+        ));
+        let cli = Cli::try_parse_from([
+            "clipcut",
+            "beats",
+            "latest",
+            "redo",
+            "3",
+            "--kind",
+            "GIF",
+            "--query",
+            "shocked cat",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Beats {
+                action: Some(cli::BeatsAction::Redo { kind: Some(clipcut_core::VisualKind::Gif), query: Some(q), .. }),
+                ..
+            }) if q == "shocked cat"
+        ));
+        let cli = Cli::try_parse_from(["clipcut", "beats", "latest", "--json"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Beats {
+                action: None,
+                json: true,
+                ..
+            })
+        ));
+        assert!(Cli::try_parse_from(["clipcut", "beats", "latest", "unlock"]).is_err());
+        assert!(
+            Cli::try_parse_from(["clipcut", "beats", "latest", "redo", "1", "--kind", "video"])
+                .is_err()
+        );
     }
 }
