@@ -101,7 +101,7 @@ A paused stage shows `status: "done"`. The next stage stays `pending` and
 
 | Method | Path | Body | Response |
 |---|---|---|---|
-| PATCH | `/api/projects/{id}/beats/{beat_id}` | any of `{ text, visual: VisualPlan, locked }` | `Beat` |
+| PATCH | `/api/projects/{id}/beats/{beat_id}` | any of `{ text, visual: VisualPlan, locked }` | `Beat`; `text` or `visual` clears the render, `locked` alone keeps it |
 | POST | `/api/projects/{id}/beats/{beat_id}/search` | `{ kind?: VisualKind, query?: string }` | `Beat` with fresh `candidates` (no download) |
 | POST | `/api/projects/{id}/beats/{beat_id}/choose` | `{ index }` (into `candidates`) | `Beat` (asset fetched; `locked = true`) |
 | POST | `/api/projects/{id}/beats/{beat_id}/auto` | – | `Beat`: re-runs the automatic search, fallbacks and pick for this beat only; clears `locked` |

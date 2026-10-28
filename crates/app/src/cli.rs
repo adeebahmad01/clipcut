@@ -1,5 +1,5 @@
 //! Command-line batch, queue, clip, publish, ideas, list, show, delete,
-//! duplicate, stop, edit, render settings, config and API keys, and finding a project
+//! duplicate, stop, edit, beats, render settings, config and API keys, and finding a project
 //! from part of its ID.
 //! When the app is already running on this machine they go through its API,
 //! so the two never write the same queue or sign-in at once; otherwise they
@@ -15,7 +15,9 @@ use clipcut_core::keys::{KeyPool, MAX_KEYS_PER_SERVICE};
 use clipcut_core::model::ProjectKind;
 use clipcut_core::timeline::CaptionPreset;
 use clipcut_core::tools::TOOL_NAMES;
-use clipcut_core::{Config, Paths, Project, Stage, StageState, Status};
+use clipcut_core::{
+    Beat, BeatStatus, Config, Paths, Project, Stage, StageState, Status, VisualKind,
+};
 use clipcut_sources::IdeaSource;
 use serde_json::{Value, json};
 
@@ -1413,6 +1415,19 @@ fn and_list(items: &[&str]) -> String {
     }
 }
 
+/// What to run to make `p`'s video again, if anything.
+fn carry_on(p: &Project) -> String {
+    let short = short_id(&p.id);
+    match crate::pipeline::first_unfinished(p) {
+        Some(Stage::Render) => format!("Render it with `clipcut render {short}`.\n"),
+        Some(stage) => format!(
+            "`clipcut run {short}` carries on from the {}.\n",
+            stage.label().to_lowercase()
+        ),
+        None => String::new(),
+    }
+}
+
 /// What `clipcut edit` says it changed in `before` (now `after`), and how
 /// to make the video again.
 pub fn edit_summary(before: &Project, after: &Project, fields: &[&str]) -> String {
@@ -1420,17 +1435,7 @@ pub fn edit_summary(before: &Project, after: &Project, fields: &[&str]) -> Strin
         return format!("{} already has those; nothing changed.\n", before.id);
     }
     let mut out = format!("Changed the {} of {}.\n", and_list(fields), before.id);
-    let short = short_id(&after.id);
-    match crate::pipeline::first_unfinished(after) {
-        Some(Stage::Render) => out += &format!("Render it with `clipcut render {short}`.\n"),
-        Some(stage) => {
-            out += &format!(
-                "`clipcut run {short}` carries on from the {}.\n",
-                stage.label().to_lowercase()
-            )
-        }
-        None => {}
-    }
+    out += &carry_on(after);
     let details = ["title", "description", "hashtags"];
     if !before.published.is_empty() && fields.iter().any(|f| details.contains(f)) {
         out += "Videos already on YouTube keep their old title, description and hashtags.\n";
@@ -1485,6 +1490,453 @@ pub async fn edit(state: &AppState, query: &str, opts: EditOpts) -> anyhow::Resu
     };
     print!("{}", edit_summary(&before, &after, &fields));
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// beats
+
+pub const VISUAL_KINDS: OneOf<VisualKind> = OneOf::new(
+    &[
+        "youtube", "article", "meme", "gif", "image", "stock", "text",
+    ],
+    parse_visual_kind,
+);
+
+pub fn parse_visual_kind(s: &str) -> Result<VisualKind, String> {
+    serde_json::from_value(Value::String(s.trim().to_ascii_lowercase()))
+        .map_err(|_| "one of youtube, article, meme, gif, image, stock, text".to_string())
+}
+
+#[derive(clap::Subcommand, Debug, Clone)]
+pub enum BeatsAction {
+    /// Keep these beats' visuals when the visuals are made again: `lock 2 5`, `lock 1-4` or `lock all`.
+    Lock {
+        #[arg(required = true)]
+        beats: Vec<String>,
+    },
+    /// Let `clipcut run --from assets` find new visuals for these beats again.
+    Unlock {
+        #[arg(required = true)]
+        beats: Vec<String>,
+    },
+    /// Find new visuals for these beats now: `redo 3 --kind gif --query "shocked cat"`.
+    Redo {
+        #[arg(required = true)]
+        beats: Vec<String>,
+        /// Look for this kind of visual instead.
+        #[arg(long, value_parser = VISUAL_KINDS)]
+        kind: Option<VisualKind>,
+        /// Search for this instead.
+        #[arg(long)]
+        query: Option<String>,
+    },
+}
+
+/// `gif`, as the beat sheet and `--kind` name it.
+fn kind_slug(kind: VisualKind) -> String {
+    serde_json::to_value(kind)
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_default()
+}
+
+/// The positions in `p.beats` that `wanted` names: beat numbers from 1,
+/// ranges such as `2-4`, beat IDs such as `b03`, or `all`. In the order
+/// given, each once.
+pub fn pick_beats(p: &Project, wanted: &[String]) -> anyhow::Result<Vec<usize>> {
+    let count = p.beats.len();
+    let mut picked: Vec<usize> = Vec::new();
+    for raw in wanted {
+        let word = raw.trim();
+        let number = |s: &str| -> anyhow::Result<usize> {
+            match s.trim().parse::<usize>() {
+                Ok(n) if (1..=count).contains(&n) => Ok(n - 1),
+                _ => anyhow::bail!(
+                    "{} has beats 1 to {count}; {word:?} isn't one of them \
+                     (`clipcut beats {}` lists them)",
+                    p.id,
+                    short_id(&p.id)
+                ),
+            }
+        };
+        let range: Vec<usize> = if word.eq_ignore_ascii_case("all") {
+            (0..count).collect()
+        } else if let Some(i) = p.beats.iter().position(|b| b.id == word) {
+            vec![i]
+        } else if let Some((from, to)) = word.split_once('-') {
+            let (from, to) = (number(from)?, number(to)?);
+            anyhow::ensure!(
+                from <= to,
+                "{word:?} runs backwards; write it as {}-{}",
+                to + 1,
+                from + 1
+            );
+            (from..=to).collect()
+        } else {
+            vec![number(word)?]
+        };
+        for i in range {
+            if !picked.contains(&i) {
+                picked.push(i);
+            }
+        }
+    }
+    Ok(picked)
+}
+
+/// Where a beat's visual comes from: `youtube: Why the Moon…`, `text: WHO KNEW`.
+fn beat_source(b: &Beat) -> String {
+    match &b.asset {
+        Some(asset) => {
+            let title = b
+                .chosen
+                .and_then(|i| b.candidates.get(i))
+                .map(|c| one_line(&c.title))
+                .filter(|t| !t.is_empty());
+            match title {
+                Some(title) => format!("{}: {title}", asset.provider),
+                None => asset.provider.clone(),
+            }
+        }
+        None if b.visual.kind == VisualKind::Text => match b.visual.on_screen_text.as_deref() {
+            Some(text) if !text.trim().is_empty() => format!("text: {}", one_line(text)),
+            _ => "captions only".into(),
+        },
+        None => "-".into(),
+    }
+}
+
+fn beat_status(b: &Beat) -> String {
+    let status = match b.status {
+        BeatStatus::Pending => "pending",
+        BeatStatus::Searching => "searching",
+        BeatStatus::Ready => "ready",
+        BeatStatus::Fallback => "fallback",
+        BeatStatus::Failed => "failed",
+    };
+    if b.locked {
+        format!("{status}, locked")
+    } else {
+        status.into()
+    }
+}
+
+/// `0.0–2.4` once the voiceover has timed the beat, `-` before.
+fn beat_time(b: &Beat) -> String {
+    if b.end_s > 0.0 {
+        format!("{:.1}–{:.1}", b.start_s, b.end_s)
+    } else {
+        "-".into()
+    }
+}
+
+const SOURCE_WIDTH: usize = 36;
+const NARRATION_WIDTH: usize = 50;
+
+/// The `clipcut beats` table: each beat's number, time in the voiceover,
+/// visual, status and source, and the words it covers, then any errors and
+/// how to change them.
+pub fn beats_table(p: &Project) -> String {
+    let short = short_id(&p.id);
+    if p.beats.is_empty() {
+        return format!(
+            "{} has no beat sheet yet ({}); `clipcut run {short}` makes it.\n",
+            p.id,
+            project_status(p)
+        );
+    }
+    let rows: Vec<[String; 6]> = p
+        .beats
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            [
+                (i + 1).to_string(),
+                beat_time(b),
+                kind_slug(b.visual.kind),
+                beat_status(b),
+                shorten(&beat_source(b), SOURCE_WIDTH),
+                shorten(&b.text, NARRATION_WIDTH),
+            ]
+        })
+        .collect();
+    let header = ["#", "TIME", "VISUAL", "STATUS", "SOURCE", "NARRATION"].map(String::from);
+    let width = |col: usize| {
+        std::iter::once(&header)
+            .chain(&rows)
+            .map(|r| r[col].chars().count())
+            .max()
+            .unwrap_or(0)
+    };
+    let w = [width(0), width(1), width(2), width(3), width(4)];
+    let mut out: String = std::iter::once(&header)
+        .chain(&rows)
+        .map(|[n, time, kind, status, source, text]| {
+            format!(
+                "{n:>0$}  {time:<1$}  {kind:<2$}  {status:<3$}  {source:<4$}  {text}\n",
+                w[0], w[1], w[2], w[3], w[4]
+            )
+        })
+        .collect();
+    let errors: Vec<String> = p
+        .beats
+        .iter()
+        .enumerate()
+        .filter_map(|(i, b)| {
+            let error = one_line(b.error.as_deref()?);
+            (!error.is_empty()).then(|| format!("Beat {}: {}\n", i + 1, shorten(&error, 200)))
+        })
+        .collect();
+    if !errors.is_empty() {
+        out += "\n";
+        out += &errors.concat();
+    }
+    // A clip's one beat is its source moment.
+    if p.kind != ProjectKind::Clip {
+        out += &format!(
+            "\nKeep a visual:           clipcut beats {short} lock 2\n\
+             Find a new one now:      clipcut beats {short} redo 3 --kind gif --query \"…\"\n\
+             Redo every unlocked one: clipcut run {short} --from assets\n"
+        );
+    }
+    out
+}
+
+/// `beat 3`, `beats 2 and 5`.
+fn beat_numbers(numbers: &[usize]) -> String {
+    let words: Vec<String> = numbers.iter().map(|n| (n + 1).to_string()).collect();
+    let words: Vec<&str> = words.iter().map(String::as_str).collect();
+    let noun = if numbers.len() == 1 { "beat" } else { "beats" };
+    format!("{noun} {}", and_list(&words))
+}
+
+/// `clipcut beats`: list the beat sheet, lock or unlock beats, or find new
+/// visuals for some. When the app is running the changes go through it,
+/// which refuses while it is working on the project.
+pub async fn beats(
+    state: &AppState,
+    query: &str,
+    action: Option<BeatsAction>,
+    json: bool,
+) -> anyhow::Result<()> {
+    use std::io::Write;
+    anyhow::ensure!(
+        !(json && action.is_some()),
+        "--json only lists the beats; leave it out to change them"
+    );
+    let id = resolve_id(state, query)?;
+    let project = state.store.get(&id)?;
+    let text = match action {
+        None if json => serde_json::to_string_pretty(&project.beats)? + "\n",
+        None => beats_table(&project),
+        Some(BeatsAction::Lock { beats }) => set_locked(state, &project, &beats, true).await?,
+        Some(BeatsAction::Unlock { beats }) => set_locked(state, &project, &beats, false).await?,
+        Some(BeatsAction::Redo { beats, kind, query }) => {
+            redo_beats(state, &project, &beats, kind, query).await?
+        }
+    };
+    // `clipcut beats latest --json | head` closes the pipe early; that's fine.
+    match std::io::stdout().lock().write_all(text.as_bytes()) {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        written => Ok(written?),
+    }
+}
+
+/// Without the app, a project marked running belongs to whatever runs it.
+fn ensure_not_marked_running(p: &Project) -> anyhow::Result<()> {
+    if let Some(stage) = running_stage(p) {
+        anyhow::bail!(
+            "{} is marked running ({}); let it finish, or stop it with `clipcut stop {}` first",
+            p.id,
+            stage.label().to_lowercase(),
+            short_id(&p.id)
+        );
+    }
+    Ok(())
+}
+
+/// Locks or unlocks beats as the project page's lock button does. Only
+/// visuals that were downloaded can be kept; the video itself is unchanged.
+async fn set_locked(
+    state: &AppState,
+    p: &Project,
+    wanted: &[String],
+    locked: bool,
+) -> anyhow::Result<String> {
+    let id = &p.id;
+    let picked = pick_beats(p, wanted)?;
+    let mut out = String::new();
+    let (mut change, mut already, mut nothing) = (Vec::new(), Vec::new(), Vec::new());
+    for i in picked {
+        let b = &p.beats[i];
+        if b.locked == locked {
+            already.push(i);
+        } else if locked && b.asset.is_none() {
+            nothing.push(i);
+        } else {
+            change.push(i);
+        }
+    }
+    if !change.is_empty() {
+        let dir = state.store.dir(id);
+        match running_app(state).await {
+            Some(base) if app_serves_folder(&base, id, &dir).await => {
+                for &i in &change {
+                    let beat = &p.beats[i].id;
+                    api(
+                        reqwest::Method::PATCH,
+                        &format!("{base}/projects/{id}/beats/{beat}"),
+                        Some(json!({ "locked": locked })),
+                    )
+                    .await
+                    .with_context(|| format!("could not change beat {} of {id}", i + 1))?;
+                }
+            }
+            _ => {
+                ensure_not_marked_running(p)?;
+                let beat_ids: Vec<String> = change.iter().map(|&i| p.beats[i].id.clone()).collect();
+                state
+                    .store
+                    .update(id, |p| {
+                        for b in p.beats.iter_mut().filter(|b| beat_ids.contains(&b.id)) {
+                            b.locked = locked;
+                        }
+                        Ok(())
+                    })
+                    .await
+                    .with_context(|| format!("could not change the beats of {id}"))?;
+            }
+        }
+        let verb = if locked { "Locked" } else { "Unlocked" };
+        out += &format!("{verb} {} of {id}.\n", beat_numbers(&change));
+    }
+    let word = if locked { "locked" } else { "unlocked" };
+    if !already.is_empty() {
+        let verb = if already.len() == 1 { "is" } else { "are" };
+        out += &format!(
+            "{} {verb} already {word}.\n",
+            capitalize(&beat_numbers(&already))
+        );
+    }
+    if !nothing.is_empty() {
+        let verb = if nothing.len() == 1 { "has" } else { "have" };
+        out += &format!(
+            "{} {verb} no downloaded visual to keep.\n",
+            capitalize(&beat_numbers(&nothing))
+        );
+    }
+    if locked && !change.is_empty() && p.kind != ProjectKind::Clip {
+        out += &format!(
+            "`clipcut run {} --from assets` finds new visuals for the other beats.\n",
+            short_id(id)
+        );
+    }
+    Ok(out)
+}
+
+/// `beat 3` → `Beat 3`.
+fn capitalize(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// What `redo` says about one beat: `Beat 3: gif, giphy: Shocked cat`.
+fn redone_line(number: usize, planned: VisualKind, b: &Beat) -> String {
+    let source = beat_source(b);
+    let kind = kind_slug(b.visual.kind);
+    match b.status {
+        BeatStatus::Fallback => format!(
+            "Beat {number}: no {} worked, so it shows {kind} ({source})",
+            kind_slug(planned)
+        ),
+        _ => format!("Beat {number}: {kind} ({source})"),
+    }
+}
+
+/// Finds new visuals for beats now, as the project page's ↻ button on a beat
+/// does: the planned kind first, then its fallbacks, ending with on-screen
+/// text. `kind` and `query` change the plan first.
+async fn redo_beats(
+    state: &AppState,
+    p: &Project,
+    wanted: &[String],
+    kind: Option<VisualKind>,
+    query: Option<String>,
+) -> anyhow::Result<String> {
+    let id = &p.id;
+    anyhow::ensure!(
+        p.kind != ProjectKind::Clip,
+        "a clip's footage is its source video, so its beat can't be redone"
+    );
+    let query = query.map(|q| one_line(&q));
+    if let Some(q) = &query {
+        anyhow::ensure!(!q.is_empty(), "--query can't be empty");
+        anyhow::ensure!(q.len() <= 2000, "--query must be at most 2000 bytes");
+    }
+    let picked = pick_beats(p, wanted)?;
+    let plan = |b: &Beat| {
+        let mut visual = b.visual.clone();
+        if let Some(kind) = kind {
+            visual.kind = kind;
+        }
+        if let Some(q) = &query {
+            visual.query = q.clone();
+        }
+        visual
+    };
+    let dir = state.store.dir(id);
+    let mut out = String::new();
+    match running_app(state).await {
+        Some(base) if app_serves_folder(&base, id, &dir).await => {
+            for &i in &picked {
+                let beat = &p.beats[i];
+                let url = format!("{base}/projects/{id}/beats/{}", beat.id);
+                let visual = plan(beat);
+                if kind.is_some() || query.is_some() {
+                    api(
+                        reqwest::Method::PATCH,
+                        &url,
+                        Some(json!({ "visual": visual })),
+                    )
+                    .await
+                    .with_context(|| format!("could not change beat {} of {id}", i + 1))?;
+                }
+                let redone = api(reqwest::Method::POST, &format!("{url}/auto"), None)
+                    .await
+                    .with_context(|| format!("could not redo beat {} of {id}", i + 1))?;
+                let redone: Beat = serde_json::from_value(redone)
+                    .context("the app sent a beat ClipCut can't read")?;
+                out += &redone_line(i + 1, visual.kind, &redone);
+                out += "\n";
+            }
+        }
+        _ => {
+            ensure_not_marked_running(p)?;
+            let svc = state.services();
+            let progress = state.progress(id);
+            for &i in &picked {
+                let mut beat = p.beats[i].clone();
+                beat.visual = plan(&beat);
+                let _claim = state
+                    .claim_beat(id, &beat.id)
+                    .context("that beat is busy")?;
+                crate::pipeline::set_beat_status(state, id, &beat.id, BeatStatus::Searching)
+                    .await?;
+                let outcome = crate::pipeline::auto_visual(&svc, p, &dir, &beat, &progress).await;
+                let redone = crate::pipeline::save_outcome(state, id, &beat.id, outcome, false)
+                    .await
+                    .with_context(|| format!("could not save beat {} of {id}", i + 1))?;
+                out += &redone_line(i + 1, beat.visual.kind, &redone);
+                out += "\n";
+            }
+        }
+    }
+    let after = state.store.get(id)?;
+    out += &carry_on(&after);
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -3988,5 +4440,200 @@ mod tests {
         assert_eq!(state.config().video.format, Format::Square);
         assert_eq!(Config::load(&file).unwrap().video.format, Format::Square);
         assert_eq!(state.config().audio.music_volume, 0.14);
+    }
+
+    /// The fixture project with three beats: on-screen text, a GIF kept from
+    /// GIPHY, and a YouTube beat that found nothing.
+    fn beats_project(id: &str) -> Project {
+        let mut p = crate::test_support::finished_project();
+        p.id = id.into();
+        let gif: Beat = serde_json::from_value(json!({
+            "id": "b02", "text": "Nobody saw it coming.",
+            "visual": { "kind": "gif", "query": "shocked" },
+            "candidates": [{
+                "kind": "gif", "provider": "giphy", "title": "Shocked cat",
+                "page_url": "https://giphy.com/gifs/shocked-cat"
+            }],
+            "chosen": 0,
+            "asset": {
+                "kind": "video", "path": "assets/b02.mp4", "provider": "giphy",
+                "source_url": "https://giphy.com/gifs/shocked-cat", "credit": "GIPHY"
+            },
+            "status": "ready", "start_s": 1.5, "end_s": 3.0
+        }))
+        .unwrap();
+        let youtube: Beat = serde_json::from_value(json!({
+            "id": "b03", "text": "Then the   tide\nturned.",
+            "visual": { "kind": "youtube", "query": "tide turning", "on_screen_text": "TIDE" },
+            "status": "failed", "error": "Youtube: no captions matched",
+            "start_s": 3.0, "end_s": 4.2
+        }))
+        .unwrap();
+        p.beats.extend([gif, youtube]);
+        p
+    }
+
+    #[test]
+    fn beats_are_picked_by_number_range_id_or_all() {
+        let p = beats_project("20261012-091500-3fa9c1");
+        let pick = |words: &[&str]| {
+            let words: Vec<String> = words.iter().map(|w| w.to_string()).collect();
+            pick_beats(&p, &words).map_err(|e| e.to_string())
+        };
+        assert_eq!(pick(&["2"]), Ok(vec![1]));
+        assert_eq!(pick(&["3", "1", "3"]), Ok(vec![2, 0]));
+        assert_eq!(pick(&["2-3"]), Ok(vec![1, 2]));
+        assert_eq!(pick(&["b03", "ALL"]), Ok(vec![2, 0, 1]));
+        let out_of_range = pick(&["4"]).unwrap_err();
+        assert!(out_of_range.contains("has beats 1 to 3"), "{out_of_range}");
+        assert!(pick(&["0"]).is_err() && pick(&["two"]).is_err());
+        assert!(pick(&["3-1"]).unwrap_err().contains("write it as 1-3"));
+    }
+
+    #[test]
+    fn the_beat_sheet_shows_each_visual_and_how_to_change_it() {
+        let p = beats_project("20261012-091500-3fa9c1");
+        assert_eq!(
+            beats_table(&p),
+            "#  TIME     VISUAL   STATUS  SOURCE              NARRATION\n\
+             1  0.0–1.5  text     ready   text: One fixture   One fixture sentence.\n\
+             2  1.5–3.0  gif      ready   giphy: Shocked cat  Nobody saw it coming.\n\
+             3  3.0–4.2  youtube  failed  -                   Then the tide turned.\n\
+             \n\
+             Beat 3: Youtube: no captions matched\n\
+             \n\
+             Keep a visual:           clipcut beats 3fa9c1 lock 2\n\
+             Find a new one now:      clipcut beats 3fa9c1 redo 3 --kind gif --query \"…\"\n\
+             Redo every unlocked one: clipcut run 3fa9c1 --from assets\n"
+        );
+        let mut fresh = Project::new("Fixture", "", Format::Vertical, 30);
+        fresh.id = "20261012-091500-3fa9c1".into();
+        assert_eq!(
+            beats_table(&fresh),
+            "20261012-091500-3fa9c1 has no beat sheet yet (not started); \
+             `clipcut run 3fa9c1` makes it.\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn beats_lock_and_redo_here_or_through_the_running_app() {
+        use clipcut_core::Stage;
+        let home = crate::test_support::TestHome::new();
+        let state = home.state();
+        let id = "20261012-091500-3fa9c1";
+        state.store.create(beats_project(id)).await.unwrap();
+        let words = |w: &[&str]| w.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        let project = || state.store.get(id).unwrap();
+        let err = |e: anyhow::Error| format!("{e:#}");
+
+        // Nothing listening: locking happens here and keeps the video.
+        set_port(&state, free_port());
+        let said = set_locked(&state, &project(), &words(&["1-2"]), true)
+            .await
+            .unwrap();
+        assert_eq!(
+            said,
+            format!(
+                "Locked beat 2 of {id}.\nBeat 1 has no downloaded visual to keep.\n\
+                 `clipcut run 3fa9c1 --from assets` finds new visuals for the other beats.\n"
+            )
+        );
+        let p = project();
+        assert!(p.beats[1].locked && !p.beats[0].locked);
+        assert!(p.render.is_some(), "locking keeps the render");
+        let again = set_locked(&state, &p, &words(&["2"]), true).await.unwrap();
+        assert_eq!(again, "Beat 2 is already locked.\n");
+        assert!(beats_table(&p).contains("ready, locked"));
+
+        // Redo with another kind: on-screen text needs no search.
+        let said = redo_beats(
+            &state,
+            &p,
+            &words(&["3"]),
+            Some(VisualKind::Text),
+            Some(" the  tide ".into()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            said,
+            "Beat 3: text (text: TIDE)\nRender it with `clipcut render 3fa9c1`.\n"
+        );
+        let p = project();
+        assert_eq!(p.beats[2].visual.kind, VisualKind::Text);
+        assert_eq!(p.beats[2].visual.query, "the tide");
+        assert_eq!(p.beats[2].status, BeatStatus::Ready);
+        assert!(p.beats[2].error.is_none());
+        assert!(p.render.is_none());
+        assert_eq!(
+            p.stages
+                .iter()
+                .find(|s| s.stage == Stage::Assets)
+                .unwrap()
+                .status,
+            Status::Done
+        );
+
+        // A project marked running is left alone.
+        state
+            .store
+            .update(id, |p| {
+                p.stage_mut(Stage::Render).status = Status::Running;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let running = set_locked(&state, &project(), &words(&["2"]), false)
+            .await
+            .unwrap_err();
+        assert!(err(running).contains("is marked running (render)"));
+        state
+            .store
+            .update(id, |p| {
+                p.stage_mut(Stage::Render).status = Status::Pending;
+                p.render = crate::test_support::finished_project().render;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        // The app is up on this home: it makes the changes.
+        let (port, server) = serve(state.clone()).await;
+        set_port(&state, port);
+        let said = set_locked(&state, &project(), &words(&["all"]), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            said,
+            format!("Unlocked beat 2 of {id}.\nBeats 1 and 3 are already unlocked.\n")
+        );
+        let p = project();
+        assert!(!p.beats[1].locked);
+        assert!(p.render.is_some(), "unlocking keeps the render too");
+        let said = redo_beats(
+            &state,
+            &p,
+            &words(&["b01"]),
+            Some(VisualKind::Text),
+            Some("moon".into()),
+        )
+        .await
+        .unwrap();
+        server.abort();
+        assert!(
+            said.starts_with("Beat 1: text (text: One fixture)\n"),
+            "{said}"
+        );
+        assert_eq!(project().beats[0].visual.query, "moon");
+        assert!(project().render.is_none());
+
+        // A clip's beat is its source moment.
+        let mut clip = crate::test_support::clip_project();
+        clip.id = "20261012-101500-c11p00".into();
+        let clip_redo = redo_beats(&state, &clip, &words(&["1"]), None, None)
+            .await
+            .unwrap_err();
+        assert!(err(clip_redo).contains("can't be redone"));
+        assert!(!beats_table(&clip).contains("clipcut beats"));
     }
 }
