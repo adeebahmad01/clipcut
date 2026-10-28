@@ -93,7 +93,8 @@ With Autopilot off, ClipCut stops after Hook, Script and Beat sheet. You can:
 
 `clipcut edit <id>` makes the same kind of edits from a terminal: the
 topic, notes, length, voice, script, and the title, description and
-hashtags used on YouTube.
+hashtags used on YouTube. `clipcut beats <id>` lists the beat sheet and
+locks or redoes single beats' visuals.
 
 **Duplicate** (or `clipcut duplicate <id>`) copies a project so you can
 try another take without losing the first one. **Re-render** only redoes the final render, which is useful
@@ -362,6 +363,7 @@ clipcut render <project-id> --horizontal      # re-render as 16:9
 clipcut delete <project-id>...                # delete projects and their files
 clipcut duplicate <project-id>                # copy a project to try another take
 clipcut edit <project-id> --title "…"         # change the topic, script, title, hashtags…
+clipcut beats <project-id>                    # each beat's visual; lock or redo some
 clipcut stop <project-id>...                  # stop projects the app is making
 clipcut doctor                                # check every dependency
 clipcut setup all                             # or: yt-dlp, kokoro, searxng
@@ -381,8 +383,8 @@ ID                      STATUS               LENGTH  TOPIC
 They are also the folder names under `projects/`, and are shown in the
 app's URL (`#/p/<id>`).
 
-`run`, `render`, `publish`, `show`, `delete`, `duplicate`, `stop` and
-`edit` don't need the whole ID. Give its last few
+`run`, `render`, `publish`, `show`, `delete`, `duplicate`, `stop`,
+`edit` and `beats` don't need the whole ID. Give its last few
 characters (`3fa9c1`), its start (`20261012-0915`), or `latest` for the
 newest project. Any part of at least four characters works as long as only
 one project's ID starts or ends with it; otherwise ClipCut lists the
@@ -519,6 +521,42 @@ only its voice and YouTube details can be changed. Videos already uploaded
 keep the details they were uploaded with. When the app is running, the
 edit goes through it, and it refuses while the app is working on the
 project; without the app, a project marked running is left alone.
+
+`clipcut beats` lists a project's beat sheet: each beat's place in the
+voiceover, the kind of visual it shows, whether it was found, fell back to
+another kind, failed or is locked, where the visual came from, and the
+words it covers. Errors are listed under the table.
+
+```
+$ clipcut beats 3fa9c1
+#  TIME     VISUAL   STATUS         SOURCE                                NARRATION
+1  0.0–2.0  gif      fallback       giphy: Animated X                     X says downloads hit records,
+2  2.0–3.9  meme     ready, locked  imgflip: This Is Fine                 but its comeback story has
+3  3.9–5.2  youtube  ready          youtube: Twitter takes down its HQ'…  one glaring problem.
+4  5.2–6.6  text     ready          text: Downloads ≠ Retention           Downloads aren't the same
+```
+
+It also does what the lock and ↻ buttons on the project page's beats do.
+Beats are named by number, by a range such as `2-4`, by their ID from
+`--json`, or `all`:
+
+```bash
+clipcut beats 3fa9c1 lock 2 5        # keep these visuals
+clipcut run 3fa9c1 --from assets     # find new visuals for every unlocked beat
+clipcut beats 3fa9c1 unlock all
+clipcut beats 3fa9c1 redo 3          # find a new visual for beat 3 now
+clipcut beats 3fa9c1 redo 3 --kind gif --query "shocked cat"
+clipcut render 3fa9c1                # then render with the new visuals
+clipcut beats 3fa9c1 --json          # every beat, with its candidates, for scripts
+```
+
+Locking keeps the video as it is; only a beat with a downloaded visual
+can be locked. `redo` tries the planned kind of visual first, then the
+kinds it falls back to, ending with on-screen text, and says what it found.
+`--kind` (`youtube`, `article`, `meme`, `gif`, `image`, `stock` or
+`text`) and `--query` change the plan first. A clip's one beat is its
+source moment, so it can't be redone. When the app is running, the changes
+go through it, and it refuses while it is working on the project.
 
 ### Settings
 
