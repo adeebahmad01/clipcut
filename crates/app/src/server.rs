@@ -40,8 +40,8 @@ use crate::publish::{self, AuthStatus, ClientBody};
 use crate::queue::{self, AddBody, PublishPlan, QueueItem, QueueState};
 use crate::state::{AppState, BeatClaim, ServerEvent};
 
-const MAX_UPLOAD_BYTES: usize = 256 * 1024 * 1024;
-const UPLOAD_EXTENSIONS: &[&str] = &[
+pub(crate) const MAX_UPLOAD_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const UPLOAD_EXTENSIONS: &[&str] = &[
     "mp4", "mov", "webm", "mkv", "gif", "m4v", "avi", "png", "jpg", "jpeg", "webp", "bmp",
 ];
 
@@ -1388,18 +1388,7 @@ async fn upload_beat(
     let asset = pipeline::upload_asset(&state.services(), &dir, &rel)
         .await
         .map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
-    let mut visual = beat.visual.clone();
-    if visual.kind == VisualKind::Text {
-        visual.kind = VisualKind::Image;
-    }
-    let outcome = Outcome {
-        visual,
-        candidates: beat.candidates.clone(),
-        chosen: None,
-        asset: Some(asset),
-        status: BeatStatus::Ready,
-        error: None,
-    };
+    let outcome = pipeline::upload_outcome(&beat, asset);
     let updated = pipeline::save_outcome(&state, &id, &beat_id, outcome, true).await?;
     cleanup.0 = PathBuf::new();
     Ok(Json(updated))
