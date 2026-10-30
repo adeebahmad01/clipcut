@@ -93,8 +93,8 @@ With Autopilot off, ClipCut stops after Hook, Script and Beat sheet. You can:
 
 `clipcut edit <id>` makes the same kind of edits from a terminal: the
 topic, notes, length, voice, script, and the title, description and
-hashtags used on YouTube. `clipcut beats <id>` lists the beat sheet and
-locks or redoes single beats' visuals.
+hashtags used on YouTube. `clipcut beats <id>` lists the beat sheet,
+locks or redoes single beats' visuals, and puts your own files on beats.
 
 **Duplicate** (or `clipcut duplicate <id>`) copies a project so you can
 try another take without losing the first one. **Re-render** only redoes the final render, which is useful
@@ -363,7 +363,7 @@ clipcut render <project-id> --horizontal      # re-render as 16:9
 clipcut delete <project-id>...                # delete projects and their files
 clipcut duplicate <project-id>                # copy a project to try another take
 clipcut edit <project-id> --title "…"         # change the topic, script, title, hashtags…
-clipcut beats <project-id>                    # each beat's visual; lock or redo some
+clipcut beats <project-id>                    # each beat's visual; lock, redo or replace some
 clipcut stop <project-id>...                  # stop projects the app is making
 clipcut doctor                                # check every dependency
 clipcut setup all                             # or: yt-dlp, kokoro, searxng
@@ -536,7 +536,8 @@ $ clipcut beats 3fa9c1
 4  5.2–6.6  text     ready          text: Downloads ≠ Retention           Downloads aren't the same
 ```
 
-It also does what the lock and ↻ buttons on the project page's beats do.
+It also does what the lock, ↻ and upload buttons on the project page's
+beats do.
 Beats are named by number, by a range such as `2-4`, by their ID from
 `--json`, or `all`:
 
@@ -546,6 +547,7 @@ clipcut run 3fa9c1 --from assets     # find new visuals for every unlocked beat
 clipcut beats 3fa9c1 unlock all
 clipcut beats 3fa9c1 redo 3          # find a new visual for beat 3 now
 clipcut beats 3fa9c1 redo 3 --kind gif --query "shocked cat"
+clipcut beats 3fa9c1 use 4 ~/clip.mp4  # show your own file on beat 4
 clipcut render 3fa9c1                # then render with the new visuals
 clipcut beats 3fa9c1 --json          # every beat, with its candidates, for scripts
 ```
@@ -554,9 +556,13 @@ Locking keeps the video as it is; only a beat with a downloaded visual
 can be locked. `redo` tries the planned kind of visual first, then the
 kinds it falls back to, ending with on-screen text, and says what it found.
 `--kind` (`youtube`, `article`, `meme`, `gif`, `image`, `stock` or
-`text`) and `--query` change the plan first. A clip's one beat is its
-source moment, so it can't be redone. When the app is running, the changes
-go through it, and it refuses while it is working on the project.
+`text`) and `--query` change the plan first. `use` shows a video, GIF or
+image of yours (`.mp4`, `.mov`, `.webm`, `.mkv`, `.m4v`, `.avi`, `.gif`,
+`.png`, `.jpg`, `.webp` or `.bmp`, up to 256 MiB; not SVG) on one beat and
+locks it, so `clipcut run --from assets` keeps it; the file is copied into
+the project. A clip's one beat is its source moment, so it can't be redone
+or replaced. When the app is running, the changes go through it, and it
+refuses while it is working on the project.
 
 ### Settings
 

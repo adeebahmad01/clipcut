@@ -700,6 +700,23 @@ pub struct Outcome {
     pub error: Option<String>,
 }
 
+/// A user's file as the beat's visual. A text beat becomes an image beat so
+/// the file is shown.
+pub fn upload_outcome(beat: &Beat, asset: Asset) -> Outcome {
+    let mut visual = beat.visual.clone();
+    if visual.kind == VisualKind::Text {
+        visual.kind = VisualKind::Image;
+    }
+    Outcome {
+        visual,
+        candidates: beat.candidates.clone(),
+        chosen: None,
+        asset: Some(asset),
+        status: BeatStatus::Ready,
+        error: None,
+    }
+}
+
 /// Write an outcome onto the beat (if it still exists) and drop the replaced asset file.
 pub async fn save_outcome(
     state: &AppState,

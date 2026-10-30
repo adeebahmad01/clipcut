@@ -189,6 +189,11 @@ async fn api(method: reqwest::Method, url: &str, body: Option<Value>) -> anyhow:
     if let Some(body) = body {
         req = req.json(&body);
     }
+    api_send(req).await
+}
+
+/// Sends a request to the running app and returns its JSON, or its error.
+async fn api_send(req: reqwest::RequestBuilder) -> anyhow::Result<Value> {
     let resp = req.send().await.context("could not reach the running app")?;
     let status = resp.status();
     let value: Value = resp.json().await.unwrap_or(Value::Null);
@@ -1530,6 +1535,14 @@ pub enum BeatsAction {
         #[arg(long)]
         query: Option<String>,
     },
+    /// Show your own video, GIF or image on a beat and lock it: `use 4 ~/clip.mp4`.
+    Use {
+        /// The beat's number or ID.
+        beat: String,
+        /// A video, GIF, PNG, JPEG, WebP or BMP file, up to 256 MiB.
+        #[arg(value_hint = clap::ValueHint::FilePath)]
+        file: PathBuf,
+    },
 }
 
 /// `gif`, as the beat sheet and `--kind` name it.
@@ -1696,6 +1709,7 @@ pub fn beats_table(p: &Project) -> String {
         out += &format!(
             "\nKeep a visual:           clipcut beats {short} lock 2\n\
              Find a new one now:      clipcut beats {short} redo 3 --kind gif --query \"…\"\n\
+             Show your own file:      clipcut beats {short} use 3 clip.mp4\n\
              Redo every unlocked one: clipcut run {short} --from assets\n"
         );
     }
@@ -1734,6 +1748,7 @@ pub async fn beats(
         Some(BeatsAction::Redo { beats, kind, query }) => {
             redo_beats(state, &project, &beats, kind, query).await?
         }
+        Some(BeatsAction::Use { beat, file }) => use_file(state, &project, &beat, &file).await?,
     };
     // `clipcut beats latest --json | head` closes the pipe early; that's fine.
     match std::io::stdout().lock().write_all(text.as_bytes()) {
@@ -1936,6 +1951,98 @@ async fn redo_beats(
     }
     let after = state.store.get(id)?;
     out += &carry_on(&after);
+    Ok(out)
+}
+
+/// Checks that `file` is something the app's upload takes, and returns its
+/// extension, lowercased.
+fn upload_extension(file: &Path) -> anyhow::Result<String> {
+    use crate::server::{MAX_UPLOAD_BYTES, UPLOAD_EXTENSIONS};
+    let shown = file.display();
+    let meta = std::fs::metadata(file).with_context(|| format!("could not read {shown}"))?;
+    anyhow::ensure!(meta.is_file(), "{shown} isn't a file");
+    let ext = file
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    anyhow::ensure!(
+        UPLOAD_EXTENSIONS.contains(&ext.as_str()),
+        "{shown} isn't a video, GIF or image ClipCut can show; use a .{} file",
+        UPLOAD_EXTENSIONS.join(", .")
+    );
+    anyhow::ensure!(meta.len() > 0, "{shown} is empty");
+    anyhow::ensure!(
+        meta.len() <= MAX_UPLOAD_BYTES as u64,
+        "{shown} is over 256 MiB"
+    );
+    Ok(ext)
+}
+
+/// Shows the user's own file on a beat, as the upload button on the project
+/// page's beat does. The beat is locked, so `clipcut run --from assets`
+/// keeps the file.
+async fn use_file(
+    state: &AppState,
+    p: &Project,
+    wanted: &str,
+    file: &Path,
+) -> anyhow::Result<String> {
+    let id = &p.id;
+    anyhow::ensure!(
+        p.kind != ProjectKind::Clip,
+        "a clip's footage is its source video, so its beat can't show another file"
+    );
+    let picked = pick_beats(p, &[wanted.to_string()])?;
+    let [i] = picked[..] else {
+        anyhow::bail!("`use` puts the file on one beat; give one beat number or ID");
+    };
+    let beat = &p.beats[i];
+    let ext = upload_extension(file)?;
+    let name = file
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| format!("upload.{ext}"));
+    let failed = || format!("could not use {} on beat {} of {id}", file.display(), i + 1);
+    let dir = state.store.dir(id);
+    match running_app(state).await {
+        Some(base) if app_serves_folder(&base, id, &dir).await => {
+            let body = tokio::fs::File::open(file).await.with_context(failed)?;
+            let len = body.metadata().await.with_context(failed)?.len();
+            let part =
+                reqwest::multipart::Part::stream_with_length(body, len).file_name(name.clone());
+            let req = reqwest::Client::new()
+                .post(format!("{base}/projects/{id}/beats/{}/upload", beat.id))
+                .multipart(reqwest::multipart::Form::new().part("file", part));
+            api_send(req).await.with_context(failed)?;
+        }
+        _ => {
+            ensure_not_marked_running(p)?;
+            let _claim = state
+                .claim_beat(id, &beat.id)
+                .context("that beat is busy")?;
+            let rel = format!(
+                "assets/{}-upload-{}.{ext}",
+                beat.id,
+                uuid::Uuid::new_v4().simple()
+            );
+            let copy = dir.join(&rel);
+            let used = async {
+                tokio::fs::create_dir_all(clipcut_core::paths::ProjectPaths(&dir).assets()).await?;
+                tokio::fs::copy(file, &copy).await?;
+                let asset = crate::pipeline::upload_asset(&state.services(), &dir, &rel).await?;
+                let outcome = crate::pipeline::upload_outcome(beat, asset);
+                crate::pipeline::save_outcome(state, id, &beat.id, outcome, true).await
+            }
+            .await;
+            if used.is_err() {
+                let _ = std::fs::remove_file(&copy);
+            }
+            used.with_context(failed)?;
+        }
+    }
+    let mut out = format!("Beat {} shows {name} now, locked.\n", i + 1);
+    out += &carry_on(&state.store.get(id)?);
     Ok(out)
 }
 
@@ -4504,6 +4611,7 @@ mod tests {
              \n\
              Keep a visual:           clipcut beats 3fa9c1 lock 2\n\
              Find a new one now:      clipcut beats 3fa9c1 redo 3 --kind gif --query \"…\"\n\
+             Show your own file:      clipcut beats 3fa9c1 use 3 clip.mp4\n\
              Redo every unlocked one: clipcut run 3fa9c1 --from assets\n"
         );
         let mut fresh = Project::new("Fixture", "", Format::Vertical, 30);
@@ -4635,5 +4743,110 @@ mod tests {
             .unwrap_err();
         assert!(err(clip_redo).contains("can't be redone"));
         assert!(!beats_table(&clip).contains("clipcut beats"));
+    }
+
+    #[tokio::test]
+    async fn beats_show_your_own_file_here_or_through_the_running_app() {
+        let home = crate::test_support::TestHome::new();
+        let state = home.state();
+        let id = "20261012-091500-3fa9c1";
+        state.store.create(beats_project(id)).await.unwrap();
+        let project = || state.store.get(id).unwrap();
+        let err = |e: anyhow::Error| format!("{e:#}");
+        let assets = || {
+            let mut names: Vec<String> = std::fs::read_dir(state.store.dir(id).join("assets"))
+                .map(|d| {
+                    d.map(|e| e.unwrap().file_name().into_string().unwrap())
+                        .collect()
+                })
+                .unwrap_or_default();
+            names.sort();
+            names
+        };
+        let files = home.0.join("mine");
+        std::fs::create_dir_all(&files).unwrap();
+        let png = files.join("Still.PNG");
+        let made = std::process::Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:s=32x24",
+                "-frames:v",
+                "1",
+            ])
+            .arg(&png)
+            .status()
+            .unwrap();
+        assert!(made.success());
+
+        // Files the app's upload would refuse are refused before any work.
+        set_port(&state, free_port());
+        std::fs::write(files.join("logo.svg"), "<svg/>").unwrap();
+        std::fs::write(files.join("empty.png"), "").unwrap();
+        std::fs::write(files.join("broken.png"), "not an image").unwrap();
+        let refused = |beat: &'static str, name: &'static str| {
+            let (state, files) = (state.clone(), files.clone());
+            async move {
+                let p = state.store.get(id).unwrap();
+                err(use_file(&state, &p, beat, &files.join(name))
+                    .await
+                    .unwrap_err())
+            }
+        };
+        assert!(refused("3", "missing.mp4").await.contains("could not read"));
+        assert!(refused("3", "logo.svg").await.contains("use a .mp4, .mov"));
+        assert!(refused("3", "empty.png").await.contains("is empty"));
+        assert!(refused("1-2", "broken.png").await.contains("one beat"));
+        let broken = refused("3", "broken.png").await;
+        assert!(broken.starts_with("could not use"), "{broken}");
+        assert!(assets().is_empty(), "a file that can't be read isn't kept");
+        assert!(project().render.is_some());
+
+        // Nothing listening: the file is copied in here and the beat locked.
+        let said = use_file(&state, &project(), "3", &png).await.unwrap();
+        assert_eq!(
+            said,
+            "Beat 3 shows Still.PNG now, locked.\nRender it with `clipcut render 3fa9c1`.\n"
+        );
+        let p = project();
+        let beat = &p.beats[2];
+        let asset = beat.asset.as_ref().unwrap();
+        assert_eq!(asset.provider, "upload");
+        assert_eq!((asset.width, asset.height), (32, 24));
+        assert!(asset.path.starts_with("assets/b03-upload-") && asset.path.ends_with(".png"));
+        assert!(beat.locked && beat.status == BeatStatus::Ready && beat.error.is_none());
+        assert!(p.render.is_none());
+        assert_eq!(assets().len(), 1);
+        assert!(beats_table(&p).contains("ready, locked  upload"));
+
+        // A text beat becomes an image beat so the file shows.
+        use_file(&state, &p, "b01", &png).await.unwrap();
+        assert_eq!(project().beats[0].visual.kind, VisualKind::Image);
+
+        // The app is up on this home: the file goes through its upload, and
+        // the GIF it replaces is removed.
+        std::fs::write(state.store.dir(id).join("assets/b02.mp4"), "gif").unwrap();
+        let (port, server) = serve(state.clone()).await;
+        set_port(&state, port);
+        let said = use_file(&state, &project(), "2", &png).await.unwrap();
+        server.abort();
+        assert!(
+            said.starts_with("Beat 2 shows Still.PNG now, locked.\n"),
+            "{said}"
+        );
+        let p = project();
+        assert_eq!(p.beats[1].asset.as_ref().unwrap().provider, "upload");
+        assert!(p.beats[1].locked && p.beats[1].chosen.is_none());
+        assert_eq!(assets().len(), 3);
+        assert!(!assets().contains(&"b02.mp4".to_string()));
+
+        // A clip's beat is its source moment.
+        let mut clip = crate::test_support::clip_project();
+        clip.id = "20261012-101500-c11p00".into();
+        let clip_use = use_file(&state, &clip, "1", &png).await.unwrap_err();
+        assert!(err(clip_use).contains("can't show another file"));
     }
 }

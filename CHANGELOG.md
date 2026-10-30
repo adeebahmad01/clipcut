@@ -93,6 +93,10 @@ follow [Semantic Versioning](https://semver.org/).
   optionally with another `--kind` or `--query`. With the app running the
   changes go through it. Locking or unlocking a beat in the app no longer
   clears the rendered video.
+- `clipcut beats <id> use <beat> <file>` shows your own video, GIF or
+  image on a beat and locks it, as the upload button on a beat in the app
+  does. The file is checked and copied into the project, and with the app
+  running it goes through the app's upload.
 - `.srt` and `.vtt` caption files and a 1280×720 thumbnail with every
   render.
 - Docs for all of the above in Usage, Configuration, API, Architecture and
