@@ -863,5 +863,13 @@ mod tests {
             Cli::try_parse_from(["clipcut", "beats", "latest", "redo", "1", "--kind", "video"])
                 .is_err()
         );
+        let cli =
+            Cli::try_parse_from(["clipcut", "beats", "latest", "use", "4", "clip.mp4"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Beats { action: Some(cli::BeatsAction::Use { beat, file }), .. })
+                if beat == "4" && file == std::path::Path::new("clip.mp4")
+        ));
+        assert!(Cli::try_parse_from(["clipcut", "beats", "latest", "use", "4"]).is_err());
     }
 }
