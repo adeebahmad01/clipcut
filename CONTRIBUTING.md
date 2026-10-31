@@ -37,6 +37,20 @@ node tools/mock-server.mjs
 
 Then open the Network URL it prints.
 
+## Working on the website and docs
+
+The website is `site/`, and it renders the Markdown in `docs/` and the
+repo root into its docs section. Edit the Markdown, not the generated HTML.
+See [Releasing](docs/Releasing.md#website) to preview it locally.
+
+## Picking up a roadmap item
+
+[ROADMAP.md](ROADMAP.md) lists what comes next, each item with an ID such
+as `CC-012`. [ROADMAP-PROMPTS.md](ROADMAP-PROMPTS.md) has a ready prompt
+for each one that you can hand to an AI coding agent or follow yourself.
+Tick the item's box (`- [x]`) in the same pull request that ships it; the
+website's roadmap updates from that file on the next deploy.
+
 ## Guidelines
 
 - Match the style of the code around your change. Run `cargo fmt`.
