@@ -1,0 +1,24 @@
+{
+  "name": "clipcut-site",
+  "private": true,
+  "type": "module",
+  "description": "Builds the ClipCut website and docs from site/ and the repo's Markdown files.",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "dev": "node build.mjs && serve dist --listen tcp://0.0.0.0:4321 --no-clipboard",
+    "watch": "node --watch-path=build.mjs --watch-path=index.html --watch-path=style.css --watch-path=site.js --watch-path=favicon.svg --watch-path=assets --watch-path=../docs --watch-path=../ROADMAP.md --watch-path=../ROADMAP-PROMPTS.md --watch-path=../CHANGELOG.md --watch-path=../CONTRIBUTING.md --watch-path=../SECURITY.md --watch-preserve-output build.mjs"
+  },
+  "dependencies": {
+    "marked": "^18.1.1"
+  },
+  "devDependencies": {
+    "serve": "^14.2.6"
+  },
+  "overrides": {
+    "compression": "^1.8.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
