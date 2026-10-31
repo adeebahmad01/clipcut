@@ -35,7 +35,7 @@ use tower_http::services::ServeFile;
 
 use crate::clips::{self, ClipRequest};
 use crate::doctor;
-use crate::pipeline::{self, Outcome};
+use crate::pipeline;
 use crate::publish::{self, AuthStatus, ClientBody};
 use crate::queue::{self, AddBody, PublishPlan, QueueItem, QueueState};
 use crate::state::{AppState, BeatClaim, ServerEvent};
@@ -1170,8 +1170,6 @@ async fn search_beat(
         limited_text(query, 2000, "query")?;
     }
     let (_, beat, _claim) = manual_beat(&state, &id, &beat_id).await?;
-    let svc = state.services();
-    let progress = state.progress(&id);
     let mut visual = beat.visual.clone();
     if let Some(kind) = body.kind {
         visual.kind = kind;
@@ -1186,51 +1184,9 @@ async fn search_beat(
     if visual.kind == VisualKind::Text {
         return Err(ApiError::bad_request("text beats have nothing to search"));
     }
-    if visual.kind == VisualKind::Meme {
-        visual.meme = Some(pipeline::plan_meme(&svc, &beat, &visual).await?);
-    }
-    progress.beat(
-        &beat_id,
-        format!("Searching {:?}: {}", visual.kind, visual.query),
-    );
-    let candidates = svc.sources.candidates(visual.kind, &visual, 12).await?;
-    progress.beat(&beat_id, format!("{} result(s)", candidates.len()));
-    let (_, (updated, old)) = state
-        .store
-        .update(&id, |p| {
-            let b = p
-                .beats
-                .iter_mut()
-                .find(|b| b.id == beat_id)
-                .ok_or_else(|| anyhow::anyhow!("beat {beat_id} was removed"))?;
-            let media_changed = b.visual.kind != visual.kind
-                || b.visual.query != visual.query
-                || serde_json::to_value(&b.visual.meme)? != serde_json::to_value(&visual.meme)?;
-            let old = if media_changed {
-                b.asset.take().map(|a| a.path)
-            } else {
-                None
-            };
-            b.visual = visual;
-            b.candidates = candidates;
-            b.chosen = None;
-            if media_changed {
-                b.status = BeatStatus::Pending;
-                b.locked = false;
-                b.error = None;
-            }
-            let updated = b.clone();
-            if media_changed {
-                pipeline::reset_from(p, Stage::Render);
-                pipeline::refresh_assets_status(p);
-            }
-            Ok((updated, old))
-        })
-        .await?;
-    if let Some(old) = old {
-        pipeline::remove_asset_file(&state.store.dir(&id), &old);
-    }
-    Ok(Json(updated))
+    Ok(Json(
+        pipeline::search_visuals(&state, &id, &beat, visual).await?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -1244,57 +1200,13 @@ async fn choose_beat(
     Json(body): Json<ChooseBody>,
 ) -> ApiResult<Json<Beat>> {
     let (project, beat, _claim) = manual_beat(&state, &id, &beat_id).await?;
-    let candidate = beat
-        .candidates
-        .get(body.index)
-        .cloned()
-        .ok_or_else(|| ApiError::bad_request("no candidate at that index"))?;
-    let svc = state.services();
-    let progress = state.progress(&id);
-    let dir = state.store.dir(&id);
-    pipeline::set_beat_status(&state, &id, &beat_id, BeatStatus::Searching).await?;
-    let mut visual = beat.visual.clone();
-    visual.kind = candidate.kind;
-    match pipeline::fetch_candidate(&svc, &project, &dir, &beat, &visual, &candidate, &progress)
-        .await
-    {
-        Ok(asset) => {
-            let outcome = Outcome {
-                visual,
-                candidates: beat.candidates.clone(),
-                chosen: Some(body.index),
-                asset: Some(asset),
-                status: BeatStatus::Ready,
-                error: None,
-            };
-            Ok(Json(
-                pipeline::save_outcome(&state, &id, &beat_id, outcome, true).await?,
-            ))
-        }
-        Err(e) => {
-            let msg = format!("{e:#}");
-            restore_beat(&state, &id, &beat_id, &msg).await;
-            Err(ApiError(StatusCode::BAD_GATEWAY, msg))
-        }
+    if body.index >= beat.candidates.len() {
+        return Err(ApiError::bad_request("no candidate at that index"));
     }
-}
-
-/// After a failed choose/upload the old asset is still there; show the error next to it.
-async fn restore_beat(state: &AppState, id: &str, beat_id: &str, error: &str) {
-    let _ = state
-        .store
-        .update(id, |p| {
-            if let Some(b) = p.beats.iter_mut().find(|b| b.id == beat_id) {
-                b.status = if b.asset.is_some() || b.visual.kind == VisualKind::Text {
-                    BeatStatus::Ready
-                } else {
-                    BeatStatus::Failed
-                };
-                b.error = Some(error.to_string());
-            }
-            Ok(())
-        })
-        .await;
+    pipeline::choose_candidate(&state, &project, &beat, body.index)
+        .await
+        .map(Json)
+        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("{e:#}")))
 }
 
 async fn auto_beat(

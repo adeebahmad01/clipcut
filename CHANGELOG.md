@@ -97,6 +97,12 @@ follow [Semantic Versioning](https://semver.org/).
   image on a beat and locks it, as the upload button on a beat in the app
   does. The file is checked and copied into the project, and with the app
   running it goes through the app's upload.
+- `clipcut beats <id> search <beat>` lists up to 12 visuals a beat could
+  show, with their source, length and a link, without downloading any
+  (`--kind` and `--query` look for something else), and `choose <beat>
+  <n>` downloads one onto the beat and locks it, as searching and picking
+  on a beat in the app does. `choose <beat>` lists the results again. With
+  the app running both go through it.
 - `.srt` and `.vtt` caption files and a 1280×720 thumbnail with every
   render.
 - Docs for all of the above in Usage, Configuration, API, Architecture and

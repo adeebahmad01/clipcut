@@ -1543,6 +1543,24 @@ pub enum BeatsAction {
         #[arg(value_hint = clap::ValueHint::FilePath)]
         file: PathBuf,
     },
+    /// List visuals a beat could show, without downloading any: `search 3 --kind gif`.
+    Search {
+        /// The beat's number or ID.
+        beat: String,
+        /// Look for this kind of visual instead.
+        #[arg(long, value_parser = VISUAL_KINDS)]
+        kind: Option<VisualKind>,
+        /// Search for this instead.
+        #[arg(long)]
+        query: Option<String>,
+    },
+    /// Show one of a beat's search results and lock it: `choose 3 2`. Without a number, list them.
+    Choose {
+        /// The beat's number or ID.
+        beat: String,
+        /// The result's number from `search`.
+        result: Option<usize>,
+    },
 }
 
 /// `gif`, as the beat sheet and `--kind` name it.
@@ -1709,6 +1727,7 @@ pub fn beats_table(p: &Project) -> String {
         out += &format!(
             "\nKeep a visual:           clipcut beats {short} lock 2\n\
              Find a new one now:      clipcut beats {short} redo 3 --kind gif --query \"…\"\n\
+             Pick one yourself:       clipcut beats {short} search 3\n\
              Show your own file:      clipcut beats {short} use 3 clip.mp4\n\
              Redo every unlocked one: clipcut run {short} --from assets\n"
         );
@@ -1749,6 +1768,12 @@ pub async fn beats(
             redo_beats(state, &project, &beats, kind, query).await?
         }
         Some(BeatsAction::Use { beat, file }) => use_file(state, &project, &beat, &file).await?,
+        Some(BeatsAction::Search { beat, kind, query }) => {
+            search_beat(state, &project, &beat, kind, query).await?
+        }
+        Some(BeatsAction::Choose { beat, result }) => {
+            choose_result(state, &project, &beat, result).await?
+        }
     };
     // `clipcut beats latest --json | head` closes the pipe early; that's fine.
     match std::io::stdout().lock().write_all(text.as_bytes()) {
@@ -1993,10 +2018,7 @@ async fn use_file(
         p.kind != ProjectKind::Clip,
         "a clip's footage is its source video, so its beat can't show another file"
     );
-    let picked = pick_beats(p, &[wanted.to_string()])?;
-    let [i] = picked[..] else {
-        anyhow::bail!("`use` puts the file on one beat; give one beat number or ID");
-    };
+    let i = one_beat(p, wanted, "use")?;
     let beat = &p.beats[i];
     let ext = upload_extension(file)?;
     let name = file
@@ -2042,6 +2064,218 @@ async fn use_file(
         }
     }
     let mut out = format!("Beat {} shows {name} now, locked.\n", i + 1);
+    out += &carry_on(&state.store.get(id)?);
+    Ok(out)
+}
+
+/// The position in `p.beats` of the one beat `wanted` names, for the
+/// subcommand `verb`.
+fn one_beat(p: &Project, wanted: &str, verb: &str) -> anyhow::Result<usize> {
+    let picked = pick_beats(p, &[wanted.to_string()])?;
+    match picked[..] {
+        [i] => Ok(i),
+        _ => anyhow::bail!("`{verb}` works on one beat; give one beat number or ID"),
+    }
+}
+
+const TITLE_WIDTH: usize = 40;
+
+/// The `search` table: what beat `number` of project `id` can show, numbered
+/// for `choose`, with where each result comes from, its length and a link to
+/// look at it first.
+pub fn results_table(id: &str, number: usize, b: &Beat) -> String {
+    let short = short_id(id);
+    if b.candidates.is_empty() {
+        return format!(
+            "Beat {number} has no search results; \
+             `clipcut beats {short} search {number}` finds some, \
+             with --kind or --query to look for something else.\n"
+        );
+    }
+    let count = b.candidates.len();
+    let noun = if count == 1 { "result" } else { "results" };
+    let mut out = format!(
+        "Beat {number} has {count} {} {noun} for \"{}\":\n",
+        kind_slug(b.visual.kind),
+        one_line(&b.visual.query)
+    );
+    let rows: Vec<[String; 5]> = b
+        .candidates
+        .iter()
+        .enumerate()
+        .map(|(n, c)| {
+            [
+                (n + 1).to_string(),
+                c.provider.clone(),
+                c.duration_s.map_or_else(|| "-".into(), clock),
+                shorten(&c.title, TITLE_WIDTH),
+                c.page_url.clone(),
+            ]
+        })
+        .collect();
+    let header = ["#", "SOURCE", "LENGTH", "TITLE", "LINK"].map(String::from);
+    let width = |col: usize| {
+        std::iter::once(&header)
+            .chain(&rows)
+            .map(|r| r[col].chars().count())
+            .max()
+            .unwrap_or(0)
+    };
+    let w = [width(0), width(1), width(2), width(3)];
+    out += &std::iter::once(&header)
+        .chain(&rows)
+        .map(|[n, source, length, title, link]| {
+            format!(
+                "{n:>0$}  {source:<1$}  {length:<2$}  {title:<3$}  {link}\n",
+                w[0], w[1], w[2], w[3]
+            )
+        })
+        .collect::<String>();
+    out += "\n";
+    if b.asset.is_some()
+        && let Some(shown) = b.chosen.filter(|&c| c < count)
+    {
+        out += &format!("Beat {number} shows result {} now.\n", shown + 1);
+    }
+    out += &format!("Show one: clipcut beats {short} choose {number} 1\n");
+    out
+}
+
+/// Searches for visuals a beat could show and lists them, as the search on a
+/// beat in the app does; nothing is downloaded until one is chosen. `kind`
+/// and `query` change the plan first, which drops the beat's visual.
+async fn search_beat(
+    state: &AppState,
+    p: &Project,
+    wanted: &str,
+    kind: Option<VisualKind>,
+    query: Option<String>,
+) -> anyhow::Result<String> {
+    let id = &p.id;
+    anyhow::ensure!(
+        p.kind != ProjectKind::Clip,
+        "a clip's footage is its source video, so its beat has nothing to search"
+    );
+    let query = query.map(|q| one_line(&q));
+    if let Some(q) = &query {
+        anyhow::ensure!(!q.is_empty(), "--query can't be empty");
+        anyhow::ensure!(q.len() <= 2000, "--query must be at most 2000 bytes");
+    }
+    let i = one_beat(p, wanted, "search")?;
+    let beat = &p.beats[i];
+    let mut visual = beat.visual.clone();
+    if let Some(kind) = kind {
+        visual.kind = kind;
+    }
+    if let Some(q) = &query {
+        visual.query = q.clone();
+    }
+    anyhow::ensure!(
+        visual.kind != VisualKind::Text,
+        "beat {} shows on-screen text, which has nothing to search; \
+         add --kind with youtube, article, meme, gif, image or stock",
+        i + 1
+    );
+    let failed = || format!("could not search for beat {} of {id}", i + 1);
+    let dir = state.store.dir(id);
+    let found = match running_app(state).await {
+        Some(base) if app_serves_folder(&base, id, &dir).await => {
+            let mut body = serde_json::Map::new();
+            if let Some(kind) = kind {
+                body.insert("kind".into(), json!(kind));
+            }
+            if let Some(q) = query {
+                body.insert("query".into(), json!(q));
+            }
+            let found = api(
+                reqwest::Method::POST,
+                &format!("{base}/projects/{id}/beats/{}/search", beat.id),
+                Some(serde_json::Value::Object(body)),
+            )
+            .await
+            .with_context(failed)?;
+            serde_json::from_value(found).context("the app sent a beat ClipCut can't read")?
+        }
+        _ => {
+            ensure_not_marked_running(p)?;
+            let _claim = state
+                .claim_beat(id, &beat.id)
+                .context("that beat is busy")?;
+            crate::pipeline::search_visuals(state, id, beat, visual)
+                .await
+                .with_context(failed)?
+        }
+    };
+    if found.candidates.is_empty() {
+        return Ok(format!(
+            "Found no {} for beat {} (\"{}\"); try another --query, or --kind with \
+             youtube, article, meme, gif, image or stock.\n",
+            kind_slug(found.visual.kind),
+            i + 1,
+            one_line(&found.visual.query)
+        ));
+    }
+    Ok(results_table(id, i + 1, &found))
+}
+
+/// Shows one of a beat's search results and locks the beat, as choosing a
+/// result on a beat in the app does. Without a result, lists them.
+async fn choose_result(
+    state: &AppState,
+    p: &Project,
+    wanted: &str,
+    result: Option<usize>,
+) -> anyhow::Result<String> {
+    let id = &p.id;
+    anyhow::ensure!(
+        p.kind != ProjectKind::Clip,
+        "a clip's footage is its source video, so its beat can't show another result"
+    );
+    let i = one_beat(p, wanted, "choose")?;
+    let beat = &p.beats[i];
+    let (number, short) = (i + 1, short_id(id));
+    let Some(result) = result else {
+        return Ok(results_table(id, number, beat));
+    };
+    let count = beat.candidates.len();
+    anyhow::ensure!(
+        count > 0,
+        "beat {number} has no search results to choose from; \
+         `clipcut beats {short} search {number}` finds some"
+    );
+    anyhow::ensure!(
+        (1..=count).contains(&result),
+        "beat {number} has results 1 to {count}; {result} isn't one of them \
+         (`clipcut beats {short} choose {number}` lists them)"
+    );
+    let index = result - 1;
+    let failed = || format!("could not show result {result} on beat {number} of {id}");
+    let dir = state.store.dir(id);
+    let chosen: Beat = match running_app(state).await {
+        Some(base) if app_serves_folder(&base, id, &dir).await => {
+            let chosen = api(
+                reqwest::Method::POST,
+                &format!("{base}/projects/{id}/beats/{}/choose", beat.id),
+                Some(json!({ "index": index })),
+            )
+            .await
+            .with_context(failed)?;
+            serde_json::from_value(chosen).context("the app sent a beat ClipCut can't read")?
+        }
+        _ => {
+            ensure_not_marked_running(p)?;
+            let _claim = state
+                .claim_beat(id, &beat.id)
+                .context("that beat is busy")?;
+            crate::pipeline::choose_candidate(state, p, beat, index)
+                .await
+                .with_context(failed)?
+        }
+    };
+    let mut out = format!(
+        "Beat {number} shows result {result} now, locked ({}).\n",
+        beat_source(&chosen)
+    );
     out += &carry_on(&state.store.get(id)?);
     Ok(out)
 }
@@ -3180,6 +3414,7 @@ pub fn resolve_id(state: &AppState, query: &str) -> anyhow::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clipcut_core::Candidate;
 
     #[test]
     fn topics_skip_blank_and_comment_lines() {
@@ -4611,6 +4846,7 @@ mod tests {
              \n\
              Keep a visual:           clipcut beats 3fa9c1 lock 2\n\
              Find a new one now:      clipcut beats 3fa9c1 redo 3 --kind gif --query \"…\"\n\
+             Pick one yourself:       clipcut beats 3fa9c1 search 3\n\
              Show your own file:      clipcut beats 3fa9c1 use 3 clip.mp4\n\
              Redo every unlocked one: clipcut run 3fa9c1 --from assets\n"
         );
@@ -4848,5 +5084,181 @@ mod tests {
         clip.id = "20261012-101500-c11p00".into();
         let clip_use = use_file(&state, &clip, "1", &png).await.unwrap_err();
         assert!(err(clip_use).contains("can't show another file"));
+    }
+
+    #[test]
+    fn search_results_are_numbered_with_a_link_to_each() {
+        let mut p = beats_project("20261012-091500-3fa9c1");
+        let mut more: Candidate = serde_json::from_value(json!({
+            "kind": "gif", "provider": "tenor",
+            "title": "A cat that is extremely surprised by the news it just heard",
+            "page_url": "https://tenor.com/view/cat-123", "duration_s": 3.4
+        }))
+        .unwrap();
+        p.beats[1].candidates.push(more.clone());
+        assert_eq!(
+            results_table(&p.id, 2, &p.beats[1]),
+            "Beat 2 has 2 gif results for \"shocked\":\n\
+             #  SOURCE  LENGTH  TITLE                                     LINK\n\
+             1  giphy   -       Shocked cat                               https://giphy.com/gifs/shocked-cat\n\
+             2  tenor   0:03    A cat that is extremely surprised by th…  https://tenor.com/view/cat-123\n\
+             \n\
+             Beat 2 shows result 1 now.\n\
+             Show one: clipcut beats 3fa9c1 choose 2 1\n"
+        );
+        more.title = "Cat".into();
+        p.beats[1].candidates = vec![more];
+        p.beats[1].asset = None;
+        let one = results_table(&p.id, 2, &p.beats[1]);
+        assert!(one.starts_with("Beat 2 has 1 gif result for"), "{one}");
+        assert!(!one.contains("shows result"), "{one}");
+        assert_eq!(
+            results_table(&p.id, 1, &p.beats[0]),
+            "Beat 1 has no search results; `clipcut beats 3fa9c1 search 1` finds some, \
+             with --kind or --query to look for something else.\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn beats_search_results_are_chosen_here_or_through_the_running_app() {
+        let home = crate::test_support::TestHome::new();
+        let state = home.state();
+        let id = "20261012-091500-3fa9c1";
+        state.store.create(beats_project(id)).await.unwrap();
+        let project = || state.store.get(id).unwrap();
+        let err = |e: anyhow::Error| format!("{e:#}");
+        let pngs = || {
+            std::fs::read_dir(state.store.dir(id).join("assets"))
+                .map(|d| {
+                    d.map(|e| e.unwrap().file_name().into_string().unwrap())
+                        .filter(|n| n.ends_with(".png"))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+
+        // A picture host: one image, and one that is gone.
+        let png = home.0.join("cat.png");
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i", "color=c=red:s=32x24"])
+            .args(["-frames:v", "1"])
+            .arg(&png)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let bytes = std::fs::read(&png).unwrap();
+        let host = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", host.local_addr().unwrap().port());
+        let pictures = tokio::spawn(async move {
+            let app = axum::Router::new().route(
+                "/cat.png",
+                axum::routing::get(move || async move { bytes.clone() }),
+            );
+            axum::serve(host, app).await.unwrap()
+        });
+        let candidate = |title: &str, file: &str| {
+            json!({
+                "kind": "image", "provider": "openverse", "title": title,
+                "page_url": "https://example.org/cat", "media_url": format!("{base}/{file}")
+            })
+        };
+        let candidates: Vec<Candidate> = serde_json::from_value(json!([
+            candidate("Gone", "gone.png"),
+            candidate("Red cat", "cat.png")
+        ]))
+        .unwrap();
+        state
+            .store
+            .update(id, |p| {
+                p.beats[2].visual.kind = VisualKind::Image;
+                p.beats[2].candidates = candidates;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        // Mistakes are caught before any work.
+        set_port(&state, free_port());
+        let refused = |beat: &'static str, result: Option<usize>| {
+            let state = state.clone();
+            async move {
+                let p = state.store.get(id).unwrap();
+                err(choose_result(&state, &p, beat, result).await.unwrap_err())
+            }
+        };
+        assert!(refused("3", Some(0)).await.contains("has results 1 to 2"));
+        assert!(refused("3", Some(3)).await.contains("3 isn't one of them"));
+        assert!(refused("1", Some(1)).await.contains("no search results"));
+        assert!(refused("2-3", Some(1)).await.contains("one beat"));
+        let text = search_beat(&state, &project(), "1", None, None).await;
+        assert!(err(text.unwrap_err()).contains("has nothing to search"));
+        let blank = search_beat(&state, &project(), "3", None, Some(" ".into())).await;
+        assert!(err(blank.unwrap_err()).contains("can't be empty"));
+        assert!(project().render.is_some());
+
+        // Without a number, the results are listed.
+        let listed = choose_result(&state, &project(), "3", None).await.unwrap();
+        assert!(listed.starts_with("Beat 3 has 2 image results"), "{listed}");
+
+        // Nothing listening: a result that won't download leaves the beat
+        // failed with the reason, and one that does is shown and locked.
+        let gone = refused("3", Some(1)).await;
+        assert!(
+            gone.starts_with("could not show result 1 on beat 3"),
+            "{gone}"
+        );
+        let beat = &project().beats[2];
+        assert!(beat.status == BeatStatus::Failed && beat.error.is_some());
+        let said = choose_result(&state, &project(), "3", Some(2))
+            .await
+            .unwrap();
+        assert_eq!(
+            said,
+            "Beat 3 shows result 2 now, locked (openverse: Red cat).\n\
+             Render it with `clipcut render 3fa9c1`.\n"
+        );
+        let p = project();
+        let beat = &p.beats[2];
+        let asset = beat.asset.as_ref().unwrap();
+        assert_eq!((asset.width, asset.height), (32, 24));
+        assert!(asset.path.starts_with("assets/b03-"), "{}", asset.path);
+        assert!(beat.locked && beat.chosen == Some(1) && beat.error.is_none());
+        assert_eq!(beat.status, BeatStatus::Ready);
+        assert!(p.render.is_none());
+        assert_eq!(pngs().len(), 1);
+
+        // The app is up on this home: it downloads the result, keeps the
+        // shown one when a download fails, and replaces the old file.
+        let (port, server) = serve(state.clone()).await;
+        set_port(&state, port);
+        let gone = refused("b03", Some(1)).await;
+        assert!(
+            gone.starts_with("could not show result 1 on beat 3"),
+            "{gone}"
+        );
+        let beat = &project().beats[2];
+        assert_eq!(beat.asset.as_ref().unwrap().path, asset.path);
+        assert!(beat.status == BeatStatus::Ready && beat.error.is_some());
+        let said = choose_result(&state, &project(), "b03", Some(2))
+            .await
+            .unwrap();
+        server.abort();
+        pictures.abort();
+        assert!(
+            said.starts_with("Beat 3 shows result 2 now, locked"),
+            "{said}"
+        );
+        let beat = &project().beats[2];
+        assert_ne!(beat.asset.as_ref().unwrap().path, asset.path);
+        assert!(beat.locked && beat.error.is_none());
+        assert_eq!(pngs().len(), 1, "the replaced file is removed");
+
+        // A clip's beat is its source moment.
+        let mut clip = crate::test_support::clip_project();
+        clip.id = "20261012-101500-c11p00".into();
+        let clip_search = search_beat(&state, &clip, "1", None, None).await;
+        assert!(err(clip_search.unwrap_err()).contains("nothing to search"));
+        let clip_choose = choose_result(&state, &clip, "1", Some(1)).await;
+        assert!(err(clip_choose.unwrap_err()).contains("can't show another result"));
     }
 }
