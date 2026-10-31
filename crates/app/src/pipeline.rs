@@ -755,6 +755,126 @@ pub async fn save_outcome(
     Ok(beat)
 }
 
+/// How many results a search on one beat lists.
+pub const SEARCH_RESULTS: usize = 12;
+
+/// Searches for visuals a beat could show without downloading any, as the
+/// search on a beat in the app does. `visual` is the beat's plan with any new
+/// kind or query, and must not be text. The results become the beat's
+/// candidates; a new kind or query also drops its visual, which came from
+/// another search.
+pub async fn search_visuals(
+    state: &AppState,
+    project_id: &str,
+    beat: &Beat,
+    mut visual: VisualPlan,
+) -> anyhow::Result<Beat> {
+    let svc = state.services();
+    let progress = state.progress(project_id);
+    if visual.kind == VisualKind::Meme {
+        visual.meme = Some(plan_meme(&svc, beat, &visual).await?);
+    }
+    progress.beat(
+        &beat.id,
+        format!("Searching {:?}: {}", visual.kind, visual.query),
+    );
+    let candidates = svc
+        .sources
+        .candidates(visual.kind, &visual, SEARCH_RESULTS)
+        .await?;
+    progress.beat(&beat.id, format!("{} result(s)", candidates.len()));
+    let (_, (updated, old)) = state
+        .store
+        .update(project_id, |p| {
+            let b = p
+                .beats
+                .iter_mut()
+                .find(|b| b.id == beat.id)
+                .with_context(|| format!("beat {} was removed", beat.id))?;
+            let media_changed = b.visual.kind != visual.kind
+                || b.visual.query != visual.query
+                || serde_json::to_value(&b.visual.meme)? != serde_json::to_value(&visual.meme)?;
+            let old = if media_changed {
+                b.asset.take().map(|a| a.path)
+            } else {
+                None
+            };
+            b.visual = visual;
+            b.candidates = candidates;
+            b.chosen = None;
+            if media_changed {
+                b.status = BeatStatus::Pending;
+                b.locked = false;
+                b.error = None;
+            }
+            let updated = b.clone();
+            if media_changed {
+                reset_from(p, Stage::Render);
+                refresh_assets_status(p);
+            }
+            Ok((updated, old))
+        })
+        .await?;
+    if let Some(old) = old {
+        remove_asset_file(&state.store.dir(project_id), &old);
+    }
+    Ok(updated)
+}
+
+/// Downloads one of a beat's candidates as its visual and locks the beat, as
+/// choosing a search result in the app does. If the download fails, the beat
+/// keeps the visual it had and shows the error.
+pub async fn choose_candidate(
+    state: &AppState,
+    project: &Project,
+    beat: &Beat,
+    index: usize,
+) -> anyhow::Result<Beat> {
+    let candidate = beat
+        .candidates
+        .get(index)
+        .cloned()
+        .context("no candidate at that index")?;
+    let id = &project.id;
+    let svc = state.services();
+    let progress = state.progress(id);
+    let dir = state.store.dir(id);
+    set_beat_status(state, id, &beat.id, BeatStatus::Searching).await?;
+    let mut visual = beat.visual.clone();
+    visual.kind = candidate.kind;
+    match fetch_candidate(&svc, project, &dir, beat, &visual, &candidate, &progress).await {
+        Ok(asset) => {
+            let outcome = Outcome {
+                visual,
+                candidates: beat.candidates.clone(),
+                chosen: Some(index),
+                asset: Some(asset),
+                status: BeatStatus::Ready,
+                error: None,
+            };
+            save_outcome(state, id, &beat.id, outcome, true).await
+        }
+        Err(e) => {
+            let msg = format!("{e:#}");
+            let _ = state
+                .store
+                .update(id, |p| {
+                    if let Some(b) = p.beats.iter_mut().find(|b| b.id == beat.id) {
+                        b.status = if b.asset.is_some() || b.visual.kind == VisualKind::Text {
+                            BeatStatus::Ready
+                        } else {
+                            BeatStatus::Failed
+                        };
+                        b.error = Some(msg);
+                    }
+                    Ok(())
+                })
+                .await;
+            Err(e)
+        }
+    }
+}
+
 /// Manual visual changes can finish the assets stage without another pipeline
 /// run. Keep a running stage's own progress intact until its worker finishes.
 pub fn refresh_assets_status(p: &mut Project) {
