@@ -1,0 +1,59 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "installCommand": "npm ci --prefix site",
+  "buildCommand": "npm run build --prefix site",
+  "outputDirectory": "site/dist",
+  "cleanUrls": true,
+  "trailingSlash": false,
+  "ignoreCommand": "git cat-file -e ${VERCEL_GIT_PREVIOUS_SHA}^{commit} && git diff --quiet $VERCEL_GIT_PREVIOUS_SHA HEAD -- site docs ROADMAP.md ROADMAP-PROMPTS.md CHANGELOG.md CONTRIBUTING.md SECURITY.md README.md vercel.json .vercelignore || exit 1",
+  "redirects": [
+    {
+      "source": "/roadmap",
+      "destination": "/docs/roadmap",
+      "permanent": false
+    },
+    {
+      "source": "/changelog",
+      "destination": "/docs/changelog",
+      "permanent": false
+    },
+    {
+      "source": "/install",
+      "destination": "/docs/installation",
+      "permanent": false
+    }
+  ],
+  "headers": [
+    {
+      "source": "/assets/(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
+    },
+    {
+      "source": "/(.*)",
+      "headers": [
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        },
+        {
+          "key": "Referrer-Policy",
+          "value": "strict-origin-when-cross-origin"
+        },
+        {
+          "key": "X-Frame-Options",
+          "value": "DENY"
+        },
+        {
+          "key": "Permissions-Policy",
+          "value": "camera=(), microphone=(), geolocation=()"
+        }
+      ]
+    }
+  ]
+}
