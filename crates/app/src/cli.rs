@@ -1,4 +1,4 @@
-//! Command-line batch, queue, clip, publish, ideas, list, show, delete,
+//! Command-line batch, queue, clip, publish, ideas, list, show, export, delete,
 //! duplicate, stop, edit, beats, render settings, config and API keys, and finding a project
 //! from part of its ID.
 //! When the app is already running on this machine they go through its API,
@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 use crate::clips::{self, ClipRequest};
 use crate::publish;
 use crate::queue::{self, AddBody, ItemOptions, ItemStatus, PublishPlan, QueueItem, QueueState};
-use crate::server::PatchBody;
+use crate::server::{PatchBody, RENDER_FILES, render_file, safe_join};
 use crate::state::AppState;
 
 /// A value parser that also lists the accepted words, so `--help` and shell
@@ -936,6 +936,125 @@ pub fn show(state: &AppState, query: &str, path: bool, json: bool) -> anyhow::Re
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
         written => Ok(written?),
     }
+}
+
+// ---------------------------------------------------------------------------
+// export
+
+pub const EXPORT_FILES: OneOf<String> = OneOf::hint(&RENDER_FILES);
+
+pub struct ExportArgs {
+    pub id: String,
+    pub dir: Option<PathBuf>,
+    pub only: Vec<String>,
+    pub force: bool,
+}
+
+/// A file `clipcut export` copies: its path in the project and the name to
+/// save it under.
+pub type ExportFile = (PathBuf, String);
+
+/// The files `clipcut export` copies, and notes on files it leaves out. `only` names some of
+/// `RENDER_FILES`; without it every file the render made is copied, and one
+/// that has gone missing is noted rather than stopping the rest.
+pub fn export_files(
+    p: &Project,
+    dir: &Path,
+    only: &[String],
+) -> anyhow::Result<(Vec<ExportFile>, Vec<String>)> {
+    let short = short_id(&p.id);
+    anyhow::ensure!(
+        p.render.is_some(),
+        "{} has no video yet ({}); `clipcut run {short}` finishes it",
+        p.id,
+        project_status(p)
+    );
+    let wanted: Vec<String> = if only.is_empty() {
+        RENDER_FILES.iter().map(|w| w.to_string()).collect()
+    } else {
+        only.iter().map(|w| w.trim().to_ascii_lowercase()).collect()
+    };
+    let mut files: Vec<ExportFile> = Vec::new();
+    let mut notes = Vec::new();
+    for which in &wanted {
+        anyhow::ensure!(
+            RENDER_FILES.contains(&which.as_str()),
+            "there is no {which:?} file; name one of {}",
+            RENDER_FILES.join(", ")
+        );
+        let Some((rel, name)) = render_file(p, which) else {
+            if only.is_empty() {
+                continue;
+            }
+            let fix = match which.as_str() {
+                "vertical" | "horizontal" | "square" => {
+                    format!("`clipcut render {short} --also {which}`")
+                }
+                _ => format!("`clipcut render {short}`"),
+            };
+            anyhow::bail!("{} has no {which} file; {fix} makes it", p.id);
+        };
+        // Like the download route, only files inside the project folder.
+        let Some(path) = safe_join(dir, rel).filter(|p| p.is_file()) else {
+            let gone = format!("{which} is missing: {}", dir.join(rel).display());
+            anyhow::ensure!(
+                only.is_empty(),
+                "{gone}; `clipcut render {short}` makes it again"
+            );
+            notes.push(gone);
+            continue;
+        };
+        if files.iter().any(|(from, _)| *from == path) {
+            continue;
+        }
+        files.push((path, name));
+    }
+    Ok((files, notes))
+}
+
+/// Copies a rendered project's files out of its folder under the names the
+/// app's download buttons give them. Nothing is copied if a file would be
+/// replaced without `force`.
+pub fn export(state: &AppState, args: ExportArgs) -> anyhow::Result<()> {
+    let id = resolve_id(state, &args.id)?;
+    let project = state.store.get(&id)?;
+    let (files, notes) = export_files(&project, &state.store.dir(&id), &args.only)?;
+    for note in &notes {
+        eprintln!("Skipped: {note}");
+    }
+    let out = args.dir.unwrap_or_default();
+    std::fs::create_dir_all(&out).with_context(|| format!("couldn't make {}", out.display()))?;
+    let copies: Vec<(PathBuf, PathBuf)> = files
+        .into_iter()
+        .map(|(from, name)| (from, out.join(name)))
+        .collect();
+    if !args.force {
+        let taken: Vec<String> = copies
+            .iter()
+            .filter(|(_, to)| to.exists())
+            .map(|(_, to)| to.display().to_string())
+            .collect();
+        anyhow::ensure!(
+            taken.is_empty(),
+            "{} already there; --force replaces {}",
+            and_list(&taken.iter().map(String::as_str).collect::<Vec<_>>()),
+            if taken.len() == 1 { "it" } else { "them" }
+        );
+    }
+    for (from, to) in &copies {
+        let name = to.file_name().unwrap_or_default().to_string_lossy();
+        let part = to.with_file_name(format!(".{name}.part"));
+        let copied = std::fs::copy(from, &part).and_then(|bytes| {
+            std::fs::rename(&part, to)?;
+            Ok(bytes)
+        });
+        let bytes = copied.map_err(|e| {
+            let _ = std::fs::remove_file(&part);
+            anyhow::anyhow!("couldn't copy {} to {}: {e}", from.display(), to.display())
+        })?;
+        println!("{}  ({})", to.display(), human_size(bytes));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -3630,6 +3749,136 @@ mod tests {
         assert!(err.contains("has no video yet (not started)"), "{err}");
         show(&state, "latest", false, false).unwrap();
         show(&state, "latest", false, true).unwrap();
+    }
+
+    /// A rendered project with a square variant, captions, a thumbnail and
+    /// credits, each file written into its folder.
+    async fn rendered_fixture(state: &AppState) -> Project {
+        let mut p = crate::test_support::finished_project();
+        p.id = "20261012-091500-3fa9c1".into();
+        p.extra_formats = vec![Format::Square];
+        p.script.as_mut().unwrap().title = "Why the Moon drifts?".into();
+        let render = p.render.as_mut().unwrap();
+        render.variants = serde_json::from_value(json!([
+            {"format": "square", "path": "render/final-square.mp4", "width": 1080, "height": 1080}
+        ]))
+        .unwrap();
+        render.subtitles = serde_json::from_value(
+            json!({"srt": "render/captions.srt", "vtt": "render/captions.vtt"}),
+        )
+        .unwrap();
+        render.thumbnail_jpg = Some("render/thumb.jpg".into());
+        let p = state.store.create(p).await.unwrap();
+        let dir = state.store.dir(&p.id).join("render");
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in [
+            "final.mp4",
+            "final-square.mp4",
+            "captions.srt",
+            "captions.vtt",
+            "thumb.jpg",
+            "credits.txt",
+        ] {
+            std::fs::write(dir.join(file), file).unwrap();
+        }
+        p
+    }
+
+    #[tokio::test]
+    async fn export_names_files_after_the_title_like_the_downloads() {
+        let home = crate::test_support::TestHome::new();
+        let state = home.state();
+        let p = rendered_fixture(&state).await;
+        let dir = state.store.dir(&p.id);
+        let names = |only: &[&str]| {
+            let only: Vec<String> = only.iter().map(|w| w.to_string()).collect();
+            let (files, notes) = export_files(&p, &dir, &only).unwrap();
+            assert!(notes.is_empty(), "{notes:?}");
+            files.into_iter().map(|(_, name)| name).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(&[]),
+            [
+                "why-the-moon-drifts.mp4",
+                "why-the-moon-drifts-square.mp4",
+                "why-the-moon-drifts.srt",
+                "why-the-moon-drifts.vtt",
+                "why-the-moon-drifts-thumbnail.jpg",
+                "why-the-moon-drifts-credits.txt",
+            ]
+        );
+        // The main format is the main video, named and copied once.
+        assert_eq!(
+            names(&["vertical", "main", " SRT "]),
+            ["why-the-moon-drifts.mp4", "why-the-moon-drifts.srt"]
+        );
+
+        let err = |only: &[&str]| {
+            let only: Vec<String> = only.iter().map(|w| w.to_string()).collect();
+            export_files(&p, &dir, &only).unwrap_err().to_string()
+        };
+        assert!(
+            err(&["horizontal"]).contains("`clipcut render 3fa9c1 --also horizontal` makes it"),
+            "{}",
+            err(&["horizontal"])
+        );
+        assert!(err(&["poster"]).contains("name one of main, vertical"));
+
+        // Without --only a missing file is skipped; asked for, it stops the export.
+        std::fs::remove_file(dir.join("render/captions.vtt")).unwrap();
+        let (files, notes) = export_files(&p, &dir, &[]).unwrap();
+        assert_eq!(files.len(), 5);
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].starts_with("vtt is missing: "), "{notes:?}");
+        assert!(err(&["vtt"]).contains("`clipcut render 3fa9c1` makes it again"));
+
+        let mut unrendered = p.clone();
+        unrendered.render = None;
+        let e = export_files(&unrendered, &dir, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("has no video yet"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn export_copies_into_a_new_folder_and_replaces_only_with_force() {
+        let home = crate::test_support::TestHome::new();
+        let state = home.state();
+        rendered_fixture(&state).await;
+        let out = home.0.join("exports/moon");
+        let args = |only: &[&str], force: bool| ExportArgs {
+            id: "latest".into(),
+            dir: Some(out.clone()),
+            only: only.iter().map(|w| w.to_string()).collect(),
+            force,
+        };
+
+        export(&state, args(&["main", "thumb"], false)).unwrap();
+        let mut made: Vec<String> = std::fs::read_dir(&out)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        made.sort();
+        assert_eq!(
+            made,
+            [
+                "why-the-moon-drifts-thumbnail.jpg",
+                "why-the-moon-drifts.mp4"
+            ]
+        );
+        let video = out.join("why-the-moon-drifts.mp4");
+        assert_eq!(std::fs::read_to_string(&video).unwrap(), "final.mp4");
+
+        // One file in the way stops the whole export, before anything is copied.
+        std::fs::write(&video, "mine").unwrap();
+        let e = export(&state, args(&[], false)).unwrap_err().to_string();
+        assert!(e.contains("already there; --force replaces them"), "{e}");
+        assert_eq!(std::fs::read_to_string(&video).unwrap(), "mine");
+        assert!(!out.join("why-the-moon-drifts.srt").exists());
+
+        export(&state, args(&[], true)).unwrap();
+        assert_eq!(std::fs::read_to_string(&video).unwrap(), "final.mp4");
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), 6);
     }
 
     #[tokio::test]
