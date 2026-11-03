@@ -26,7 +26,7 @@ snake_case strings). Errors are `{"error": "message"}` with a 4xx/5xx status.
 
 ```json
 {
-  "version": "0.1.0",
+  "version": "0.2.0",
   "home": "/home/me/.local/share/clipcut",
   "network_url": "http://192.168.1.20:7878",
   "tools": { "ffmpeg": "/usr/bin/ffmpeg", "yt_dlp": null, "...": "..." },
