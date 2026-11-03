@@ -105,6 +105,20 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Copy a project's video, captions, thumbnail and credits into a folder, named after its title.
+    Export {
+        /// Project ID, its last few characters, or `latest`.
+        id: String,
+        /// Folder to copy them into, made if needed. Default: the current folder.
+        #[arg(value_hint = ValueHint::DirPath)]
+        dir: Option<PathBuf>,
+        /// Only these files, e.g. --only main,srt.
+        #[arg(long, value_delimiter = ',', value_parser = cli::EXPORT_FILES)]
+        only: Vec<String>,
+        /// Replace files that are already there.
+        #[arg(long)]
+        force: bool,
+    },
     /// Delete projects and their files: `clipcut delete 3fa9c1 b07e44`.
     Delete {
         /// Project IDs, their last few characters, or `latest`.
@@ -392,6 +406,20 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::List { limit } => cli::list(&state, limit),
         Command::Show { id, path, json } => cli::show(&state, &id, path, json),
+        Command::Export {
+            id,
+            dir,
+            only,
+            force,
+        } => cli::export(
+            &state,
+            cli::ExportArgs {
+                id,
+                dir,
+                only,
+                force,
+            },
+        ),
         Command::Delete { ids, yes, force } => {
             cli::delete(&state, cli::DeleteArgs { ids, yes, force }).await
         }
@@ -676,6 +704,8 @@ mod tests {
                 "render",
                 "queue",
                 "duplicate",
+                "export",
+                "credits",
                 "stop",
                 "completions",
                 "config",

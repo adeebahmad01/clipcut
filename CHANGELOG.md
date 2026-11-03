@@ -103,6 +103,10 @@ follow [Semantic Versioning](https://semver.org/).
   <n>` downloads one onto the beat and locks it, as searching and picking
   on a beat in the app does. `choose <beat>` lists the results again. With
   the app running both go through it.
+- `clipcut export <id> [folder]` copies a rendered project's video, extra
+  formats, captions, thumbnail and credits into a folder (made if needed),
+  named after the title as the app's download buttons name them. `--only
+  main,srt` picks some, and nothing is replaced without `--force`.
 - `.srt` and `.vtt` caption files and a 1280×720 thumbnail with every
   render.
 - Docs for all of the above in Usage, Configuration, API, Architecture and
