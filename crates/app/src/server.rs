@@ -1321,7 +1321,7 @@ impl Drop for TempFile {
 // Files
 
 /// Resolve a relative path inside the project dir; refuses `..` and absolute paths.
-fn safe_join(base: &FsPath, rel: &str) -> Option<PathBuf> {
+pub fn safe_join(base: &FsPath, rel: &str) -> Option<PathBuf> {
     let rel = FsPath::new(rel);
     if rel.components().any(|c| !matches!(c, Component::Normal(_))) {
         return None;
@@ -1425,25 +1425,29 @@ struct DownloadQuery {
     file: Option<String>,
 }
 
-async fn download(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Query(q): Query<DownloadQuery>,
-    req: Request,
-) -> ApiResult<Response> {
-    let project = project_or_404(&state, &id)?;
-    let render = project
-        .render
-        .as_ref()
-        .ok_or_else(|| ApiError::not_found("not rendered yet"))?;
-    let which = q.file.as_deref().unwrap_or("main");
-    let missing = || ApiError::not_found(format!("this render has no {which} file"));
+/// The render files `download` and `clipcut export` hand out.
+pub const RENDER_FILES: [&str; 8] = [
+    "main",
+    "vertical",
+    "horizontal",
+    "square",
+    "srt",
+    "vtt",
+    "thumb",
+    "credits",
+];
+
+/// Render file `which` (one of `RENDER_FILES`): its path in the project dir
+/// and the name it is saved under, after the title (`why-the-moon.mp4`,
+/// `why-the-moon-square.mp4`, `why-the-moon-thumbnail.jpg`). None when the
+/// project has no such file.
+pub fn render_file<'a>(project: &'a Project, which: &str) -> Option<(&'a str, String)> {
+    let render = project.render.as_ref()?;
     let (rel, suffix, ext) = match which {
         "main" => (render.path.as_str(), String::new(), "mp4"),
         "vertical" | "horizontal" | "square" => {
-            let format: Format = serde_json::from_value(json!(which))
-                .map_err(|_| ApiError::bad_request("unknown format"))?;
-            let (rel, _, _) = render.file_for(project.format, format).ok_or_else(missing)?;
+            let format: Format = serde_json::from_value(json!(which)).ok()?;
+            let (rel, _, _) = render.file_for(project.format, format)?;
             let suffix = if format == project.format {
                 String::new()
             } else {
@@ -1452,25 +1456,18 @@ async fn download(
             (rel, suffix, "mp4")
         }
         "srt" | "vtt" => {
-            let subs = render.subtitles.as_ref().ok_or_else(missing)?;
+            let subs = render.subtitles.as_ref()?;
             let rel = if which == "srt" { &subs.srt } else { &subs.vtt };
             (rel.as_str(), String::new(), which)
         }
         "thumb" => (
-            render.thumbnail_jpg.as_deref().ok_or_else(missing)?,
+            render.thumbnail_jpg.as_deref()?,
             "-thumbnail".to_string(),
             "jpg",
         ),
         "credits" => (render.credits_path.as_str(), "-credits".to_string(), "txt"),
-        _ => {
-            return Err(ApiError::bad_request(
-                "file must be main, vertical, horizontal, square, srt, vtt, thumb or credits",
-            ));
-        }
+        _ => return None,
     };
-    let path = safe_join(&state.store.dir(&id), rel)
-        .filter(|p| p.is_file())
-        .ok_or_else(missing)?;
     let ext = FsPath::new(rel)
         .extension()
         .and_then(|e| e.to_str())
@@ -1484,12 +1481,36 @@ async fn download(
             .filter(|t| !t.is_empty())
             .unwrap_or(&project.topic),
     );
+    Some((rel, format!("{name}{suffix}.{ext}")))
+}
+
+async fn download(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<DownloadQuery>,
+    req: Request,
+) -> ApiResult<Response> {
+    let project = project_or_404(&state, &id)?;
+    if project.render.is_none() {
+        return Err(ApiError::not_found("not rendered yet"));
+    }
+    let which = q.file.as_deref().unwrap_or("main");
+    if !RENDER_FILES.contains(&which) {
+        return Err(ApiError::bad_request(
+            "file must be main, vertical, horizontal, square, srt, vtt, thumb or credits",
+        ));
+    }
+    let missing = || ApiError::not_found(format!("this render has no {which} file"));
+    let (rel, name) = render_file(&project, which).ok_or_else(missing)?;
+    let path = safe_join(&state.store.dir(&id), rel)
+        .filter(|p| p.is_file())
+        .ok_or_else(missing)?;
     let mut res = ServeFile::new(path)
         .oneshot(req)
         .await
         .map_err(|e| anyhow::anyhow!(e))?
         .map(Body::new);
-    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{name}{suffix}.{ext}\"")) {
+    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{name}\"")) {
         res.headers_mut().insert(header::CONTENT_DISPOSITION, v);
     }
     Ok(res)

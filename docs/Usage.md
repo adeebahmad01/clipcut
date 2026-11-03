@@ -357,6 +357,7 @@ clipcut batch topics.txt --publish public --start "2026-10-12 15:00" --every 1d
 clipcut list                                  # every project's ID, status, length and topic
 clipcut list -n 5                             # only the newest five
 clipcut show <project-id>                     # one project: stages, files, uploads
+clipcut export <project-id> ~/Videos          # copy its video, captions, thumbnail and credits
 clipcut run <project-id> --from script        # redo script and everything after it
 clipcut run <project-id> --from assets --only # only redo visuals
 clipcut render <project-id>                   # re-render
@@ -384,8 +385,8 @@ ID                      STATUS               LENGTH  TOPIC
 They are also the folder names under `projects/`, and are shown in the
 app's URL (`#/p/<id>`).
 
-`run`, `render`, `publish`, `show`, `delete`, `duplicate`, `stop`,
-`edit` and `beats` don't need the whole ID. Give its last few
+`run`, `render`, `publish`, `show`, `export`, `delete`, `duplicate`,
+`stop`, `edit` and `beats` don't need the whole ID. Give its last few
 characters (`3fa9c1`), its start (`20261012-0915`), or `latest` for the
 newest project. Any part of at least four characters works as long as only
 one project's ID starts or ends with it; otherwise ClipCut lists the
@@ -439,6 +440,28 @@ in `project.json`:
 mpv "$(clipcut show latest --path)"
 clipcut show 3fa9c1 --json | jq -r '.script.title'
 ```
+
+`clipcut export` copies a rendered project's files out of its folder,
+named after the video's title as the project page's download buttons name
+them: the main video, each extra format, the `.srt` and `.vtt` captions,
+the thumbnail and `credits.txt`. It copies into the folder you give (made
+if needed), or the current folder, and prints each file it wrote:
+
+```
+$ clipcut export latest ~/Videos
+/home/me/Videos/the-moon-is-leaving-3-8-cm-a-year.mp4  (12 MB)
+/home/me/Videos/the-moon-is-leaving-3-8-cm-a-year-square.mp4  (9.8 MB)
+/home/me/Videos/the-moon-is-leaving-3-8-cm-a-year.srt  (1.2 KB)
+/home/me/Videos/the-moon-is-leaving-3-8-cm-a-year.vtt  (1.2 KB)
+/home/me/Videos/the-moon-is-leaving-3-8-cm-a-year-thumbnail.jpg  (180 KB)
+/home/me/Videos/the-moon-is-leaving-3-8-cm-a-year-credits.txt  (2.1 KB)
+```
+
+`--only` picks some of them: `main`, `vertical`, `horizontal`, `square`,
+`srt`, `vtt`, `thumb` and `credits` (`--only main,srt`). If any file is
+already there, nothing is copied unless you pass `--force`. A file that has
+gone missing from the project is skipped with a note, or stops the export
+when you asked for it with `--only`.
 
 `clipcut delete` shows the projects it matched and how much space they
 use, and asks before deleting them. `--yes` (`-y`) skips the question,
@@ -690,8 +713,9 @@ render/thumb.jpg    the 1280×720 thumbnail (thumb.png is the full-size cover)
 render/credits.txt  every source used
 ```
 
-You can delete a project from the app, with `clipcut delete <id>`, or by
-removing its folder.
+`clipcut export <id> <folder>` copies the render files somewhere else under
+the video's title. You can delete a project from the app, with
+`clipcut delete <id>`, or by removing its folder.
 
 Next to `projects/`, `queue.json` holds the [queue](#the-queue) and
 `youtube-oauth.json` the [YouTube](#publish-to-youtube) client and
