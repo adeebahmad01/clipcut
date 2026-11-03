@@ -15,10 +15,12 @@
 </p>
 
 <p align="center">
-  <a href="https://adeebahmad01.github.io/clipcut/"><b>Website</b></a> ·
+  <a href="https://clipcut-sigma.vercel.app/"><b>Website</b></a> ·
   <a href="https://github.com/adeebahmad01/clipcut/releases/latest"><b>Download</b></a> ·
   <a href="docs/Installation.md"><b>Install guide</b></a> ·
-  <a href="docs/Usage.md"><b>Usage</b></a>
+  <a href="docs/Usage.md"><b>Usage</b></a> ·
+  <a href="https://clipcut-sigma.vercel.app/docs"><b>Docs</b></a> ·
+  <a href="ROADMAP.md"><b>Roadmap</b></a>
 </p>
 
 ![ClipCut project view](site/assets/screenshot-project.png)
