@@ -1,35 +1,10 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ClipCut: topic in, short video out</title>
-<meta name="description" content="ClipCut turns a topic into a fast-cut short video made from YouTube moments, article screenshots, memes and GIFs, with a local AI voiceover. Free and open source for Linux and macOS.">
-<meta property="og:title" content="ClipCut">
-<meta property="og:description" content="Type a topic. Get a fast-cut short video made from real footage.">
-<meta property="og:image" content="https://adeebahmad01.github.io/clipcut/assets/screenshot-home.png">
-<meta property="og:type" content="website">
-<meta name="theme-color" content="#0a0a0b">
-<link rel="icon" href="favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="style.css">
+{{head}}
 </head>
 <body>
-<a class="skip" href="#main">Skip to content</a>
-
-<header class="top">
-  <div class="wrap top-in">
-    <a class="brand" href="#">
-      <img src="assets/logo.svg" width="26" height="26" alt="">
-      <span>ClipCut</span>
-    </a>
-    <nav aria-label="Main">
-      <a href="#download">Download</a>
-      <a href="#needs">Requirements</a>
-      <a href="#docs">Docs</a>
-      <a class="gh" href="https://github.com/adeebahmad01/clipcut">GitHub</a>
-    </nav>
-  </div>
-</header>
+{{header}}
 
 <main id="main">
 
@@ -50,7 +25,10 @@
     <p class="meta" id="version-line">Linux and macOS · Windows via WSL2 · MIT license</p>
   </div>
   <div class="wrap shot-wrap">
-    <img class="shot" src="assets/screenshot-home.png" width="1280" height="800"
+    <img class="shot" src="/assets/screenshot-home-1280.webp"
+         srcset="/assets/screenshot-home-640.webp 640w, /assets/screenshot-home-1280.webp 1280w"
+         sizes="(max-width: 1120px) calc(100vw - 40px), 1072px"
+         width="1280" height="800" fetchpriority="high" decoding="async"
          alt="The ClipCut app: a topic box with format, length and voice options, above a grid of recent video projects">
   </div>
 </section>
@@ -112,7 +90,7 @@
       <a class="plat" data-target="aarch64-apple-darwin" href="https://github.com/adeebahmad01/clipcut/releases/latest/download/clipcut-aarch64-apple-darwin.tar.gz">
         <b>macOS</b><span>Apple silicon (M1 and later)</span><i>Download .tar.gz</i>
       </a>
-      <a class="plat" href="https://github.com/adeebahmad01/clipcut/blob/main/docs/Installation.md#build-from-source">
+      <a class="plat" href="/docs/installation#build-from-source">
         <b>From source</b><span>Linux (glibc 2.38+) or Apple silicon, with Rust 1.88+</span><i>Build guide</i>
       </a>
       <a class="plat win" href="https://learn.microsoft.com/windows/wsl/install">
@@ -190,24 +168,32 @@
       <div class="step"><span class="n">3</span><div><b>Start ClipCut</b><pre><code>clipcut</code></pre><p>Open the URL it prints. The Network URL works from your phone.</p></div></div>
       <div class="step"><span class="n">4</span><div><b>Type a topic and press Make</b><p>Or from the terminal: <code>clipcut new "Why the Moon is drifting away"</code></p></div></div>
     </div>
-    <img class="shot small" src="assets/screenshot-project.png" width="1280" height="800" loading="lazy"
+    <img class="shot small" src="/assets/screenshot-project-1280.webp"
+         srcset="/assets/screenshot-project-640.webp 640w, /assets/screenshot-project-1280.webp 1280w"
+         sizes="(max-width: 1120px) calc(100vw - 40px), 1072px"
+         width="1280" height="800" loading="lazy" decoding="async"
          alt="A finished ClipCut project: the video player next to the seven completed pipeline stages">
   </div>
 </section>
 
 <section id="docs" class="docs" aria-labelledby="docs-h">
   <div class="wrap">
-    <h2 id="docs-h">Docs</h2>
+    <div class="sec-head">
+      <h2 id="docs-h">Docs</h2>
+      <a class="btn sm" href="/docs">All docs <span aria-hidden="true">→</span></a>
+    </div>
     <div class="grid3 doclinks">
-      <a href="https://github.com/adeebahmad01/clipcut/blob/main/docs/Installation.md"><b>Installation</b><span>Every OS, every dependency, building from source</span></a>
-      <a href="https://github.com/adeebahmad01/clipcut/blob/main/docs/Usage.md"><b>Usage</b><span>The app, the CLI, projects, music and sound effects</span></a>
-      <a href="https://github.com/adeebahmad01/clipcut/blob/main/docs/Configuration.md"><b>Configuration</b><span>Every setting in config.toml</span></a>
-      <a href="https://github.com/adeebahmad01/clipcut/blob/main/docs/Troubleshooting.md"><b>Troubleshooting</b><span>Fixes for common problems</span></a>
-      <a href="https://github.com/adeebahmad01/clipcut/blob/main/docs/Architecture.md"><b>Architecture</b><span>How the pieces fit together</span></a>
-      <a href="https://github.com/adeebahmad01/clipcut/blob/main/CONTRIBUTING.md"><b>Contributing</b><span>Build it, test it, send a pull request</span></a>
+      <a href="/docs/installation"><b>Installation</b><span>Every OS, every dependency, building from source</span></a>
+      <a href="/docs/usage"><b>Usage</b><span>The app, the CLI, the queue, clip mode and publishing</span></a>
+      <a href="/docs/configuration"><b>Configuration</b><span>Every setting in config.toml</span></a>
+      <a href="/docs/troubleshooting"><b>Troubleshooting</b><span>Fixes for common problems</span></a>
+      <a href="/docs/api"><b>HTTP API</b><span>The JSON API the web UI uses</span></a>
+      <a href="/docs/architecture"><b>Architecture</b><span>How the crates fit together</span></a>
     </div>
   </div>
 </section>
+
+{{roadmap}}
 
 <section class="responsible">
   <div class="wrap">
@@ -219,13 +205,7 @@
 
 </main>
 
-<footer>
-  <div class="wrap foot">
-    <span>ClipCut · MIT license · fonts under the SIL OFL</span>
-    <span><a href="https://github.com/adeebahmad01/clipcut">GitHub</a> · <a href="https://github.com/adeebahmad01/clipcut/releases">Releases</a> · <a href="https://github.com/adeebahmad01/clipcut/issues">Issues</a></span>
-  </div>
-</footer>
+{{footer}}
 
-<script src="site.js"></script>
 </body>
 </html>
