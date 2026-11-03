@@ -88,7 +88,7 @@ clipcut
 ```
 
 ```
-  ClipCut 0.1.0 is running
+  ClipCut 0.2.0 is running
 
   Local:   http://localhost:7878
   Network: http://192.168.1.20:7878

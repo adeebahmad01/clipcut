@@ -351,7 +351,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "clipcut"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -384,7 +384,7 @@ dependencies = [
 
 [[package]]
 name = "clipcut-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -403,7 +403,7 @@ dependencies = [
 
 [[package]]
 name = "clipcut-llm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -419,7 +419,7 @@ dependencies = [
 
 [[package]]
 name = "clipcut-render"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -437,7 +437,7 @@ dependencies = [
 
 [[package]]
 name = "clipcut-sources"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -460,7 +460,7 @@ dependencies = [
 
 [[package]]
 name = "clipcut-tts"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clipcut-core",
