@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-03
+
 ### Added
 
 - Publish to YouTube from the app or `clipcut publish`, with privacy and
@@ -133,5 +135,6 @@ First public release.
 - Release binaries for Linux (x86_64, ARM64) and macOS (Apple silicon),
   and a one-line installer.
 
-[Unreleased]: https://github.com/adeebahmad01/clipcut/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/adeebahmad01/clipcut/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/adeebahmad01/clipcut/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/adeebahmad01/clipcut/releases/tag/v0.1.0
