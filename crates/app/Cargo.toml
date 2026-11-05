@@ -36,3 +36,4 @@ mime_guess = "2"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 qrcode = { version = "0.14", default-features = false }
+icu_normalizer = { version = "2", default-features = false, features = ["compiled_data"] }

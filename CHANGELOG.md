@@ -6,6 +6,17 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Search and filter projects on the home page: a search box matches topics
+  and titles as you type (ignoring case and accents), chips filter by
+  status, format and kind, and a menu sorts by newest, oldest, recently
+  updated or longest. The page shows "3 of 48 projects" with a Clear
+  button, and the search and filters live in the URL, so a reload or a
+  bookmark keeps them.
+- `clipcut list --status`, `--format`, `--kind` and `--search` (`-s`)
+  filter the list the same way, using the words from the STATUS column.
+
 ## [0.2.0] - 2026-11-03
 
 ### Added

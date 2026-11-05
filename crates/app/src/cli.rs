@@ -677,6 +677,92 @@ pub fn project_status(p: &Project) -> String {
     }
 }
 
+/// The word `clipcut list --status` and the app's status filter go by: the
+/// first word of [`project_status`], with projects waiting for a review, not
+/// started or stopped part way all counted as `stopped`.
+pub fn status_group(p: &Project) -> &'static str {
+    let any = |status: Status| p.stages.iter().any(|s| s.status == status);
+    if any(Status::Running) {
+        "running"
+    } else if any(Status::Failed) {
+        "failed"
+    } else if p.render.is_none() {
+        "stopped"
+    } else if p.published.is_empty() {
+        "rendered"
+    } else {
+        "published"
+    }
+}
+
+const STATUS_WORDS: [&str; 5] = ["running", "stopped", "failed", "rendered", "published"];
+pub const STATUSES: OneOf<&'static str> = OneOf::new(&STATUS_WORDS, parse_status);
+pub const KINDS: OneOf<ProjectKind> = OneOf::new(&["story", "clip"], parse_kind);
+
+pub fn parse_status(s: &str) -> Result<&'static str, String> {
+    let s = s.trim().to_ascii_lowercase();
+    STATUS_WORDS
+        .into_iter()
+        .find(|w| *w == s)
+        .ok_or_else(|| format!("one of {}", STATUS_WORDS.join(", ")))
+}
+
+pub fn parse_kind(s: &str) -> Result<ProjectKind, String> {
+    serde_json::from_value(Value::String(s.trim().to_ascii_lowercase()))
+        .map_err(|_| "one of story, clip".to_string())
+}
+
+/// `text` in lower case without accents, so `Cafe` finds `Café`.
+fn fold(text: &str) -> String {
+    icu_normalizer::DecomposingNormalizerBorrowed::new_nfd()
+        .normalize(text)
+        .chars()
+        .filter(|c| !('\u{300}'..='\u{36f}').contains(c))
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Which projects `clipcut list` shows. Each option takes several values,
+/// comma-separated, and a project must match one value of every option given.
+#[derive(clap::Args, Debug, Default, Clone)]
+pub struct ListFilter {
+    /// Only projects with these statuses, e.g. --status failed,stopped.
+    #[arg(long, value_delimiter = ',', value_parser = STATUSES)]
+    pub status: Vec<&'static str>,
+    /// Only projects in these formats, e.g. --format vertical,square.
+    #[arg(long, value_delimiter = ',', value_parser = FORMATS)]
+    pub format: Vec<Format>,
+    /// Only stories (made from a topic) or clips (cut from a long video).
+    #[arg(long, value_delimiter = ',', value_parser = KINDS)]
+    pub kind: Vec<ProjectKind>,
+    /// Only projects whose topic or title has all these words, ignoring case
+    /// and accents.
+    #[arg(long, short = 's')]
+    pub search: Option<String>,
+}
+
+impl ListFilter {
+    pub fn matches(&self, p: &Project) -> bool {
+        fn one_of<T: PartialEq>(values: &[T], value: &T) -> bool {
+            values.is_empty() || values.contains(value)
+        }
+        if !(one_of(&self.status, &status_group(p))
+            && one_of(&self.format, &p.format)
+            && one_of(&self.kind, &p.kind))
+        {
+            return false;
+        }
+        let Some(query) = self.search.as_deref() else {
+            return true;
+        };
+        let title = p.script.as_ref().map_or("", |s| s.title.as_str());
+        let text = fold(&format!("{} {title}", p.topic));
+        fold(query)
+            .split_whitespace()
+            .all(|word| text.contains(word))
+    }
+}
+
 /// `0:42` for a rendered project, `-` otherwise.
 fn length(p: &Project) -> String {
     match &p.render {
@@ -735,20 +821,37 @@ pub fn project_table(projects: &[Project]) -> String {
         .collect()
 }
 
-pub fn list(state: &AppState, limit: Option<usize>) -> anyhow::Result<()> {
-    let mut projects = state.store.list();
+/// The line under the `clipcut list` table, when it doesn't show everything.
+fn list_footer(shown: usize, matched: usize, total: usize) -> Option<String> {
+    match (shown < matched, matched < total) {
+        (true, true) => Some(format!(
+            "Showing {shown} of {matched} matching projects ({total} in all); use --limit to see more."
+        )),
+        (true, false) => Some(format!(
+            "Showing {shown} of {total}; use --limit to see more."
+        )),
+        (false, true) => Some(format!("{matched} of {total} projects match.")),
+        (false, false) => None,
+    }
+}
+
+pub fn list(state: &AppState, limit: Option<usize>, filter: &ListFilter) -> anyhow::Result<()> {
+    let projects = state.store.list();
     if projects.is_empty() {
         println!("No projects yet. Make one with: clipcut new \"<topic>\"");
         return Ok(());
     }
     let total = projects.len();
-    projects.truncate(limit.unwrap_or(total));
+    let mut projects: Vec<Project> = projects.into_iter().filter(|p| filter.matches(p)).collect();
+    let matched = projects.len();
+    if matched == 0 {
+        println!("No projects match; there are {total} in all. Leave out the filters to see them.");
+        return Ok(());
+    }
+    projects.truncate(limit.unwrap_or(matched));
     print!("{}", project_table(&projects));
-    if projects.len() < total {
-        println!(
-            "\nShowing {} of {total}; use --limit to see more.",
-            projects.len()
-        );
+    if let Some(footer) = list_footer(projects.len(), matched, total) {
+        println!("\n{footer}");
     }
     println!("\nProjects are in {}", state.paths.projects().display());
     Ok(())
@@ -3641,6 +3744,105 @@ mod tests {
         let topic = lines[2].rsplit("  ").next().unwrap();
         assert_eq!(topic.chars().count(), TOPIC_WIDTH);
         assert!(topic.ends_with('…'));
+    }
+
+    #[test]
+    fn status_group_is_the_status_without_its_stage() {
+        use crate::test_support::{clip_project, finished_project};
+        use clipcut_core::Stage;
+
+        let mut p = finished_project();
+        assert_eq!(status_group(&p), "rendered");
+        p.published = serde_json::from_value(json!([{
+            "platform": "youtube", "format": "vertical", "video_id": "x",
+            "url": "https://youtu.be/x", "privacy": "unlisted", "uploaded_at": Utc::now()
+        }]))
+        .unwrap();
+        assert_eq!(status_group(&p), "published");
+        p.render = None;
+        at(&mut p, Stage::Assets, Status::Running);
+        assert_eq!(status_group(&p), "running");
+        at(&mut p, Stage::Assets, Status::Done);
+        at(&mut p, Stage::Voice, Status::Failed);
+        assert_eq!(status_group(&p), "failed");
+        at(&mut p, Stage::Voice, Status::Pending);
+        assert_eq!(status_group(&p), "stopped");
+        let new = Project::new("Fresh", "", Format::Vertical, 30);
+        assert_eq!(status_group(&new), "stopped");
+        assert_eq!(status_group(&clip_project()), "stopped");
+        assert_eq!(parse_status(" Failed "), Ok("failed"));
+        assert!(parse_status("needs review").is_err());
+    }
+
+    #[test]
+    fn list_filter_matches_every_option_and_all_words() {
+        use crate::test_support::{clip_project, finished_project};
+
+        let mut cafe = finished_project();
+        cafe.topic = "Café culture in Paris".into();
+        cafe.format = Format::Square;
+        cafe.script.as_mut().unwrap().title = "Why terraces face the street".into();
+        let moon = Project::new("Why the Moon drifts away", "", Format::Horizontal, 30);
+        let all = [cafe, moon, clip_project()];
+        let shown = |filter: ListFilter| -> Vec<usize> {
+            (0..all.len())
+                .filter(|&i| filter.matches(&all[i]))
+                .collect()
+        };
+        let search = |q: &str| ListFilter {
+            search: Some(q.into()),
+            ..Default::default()
+        };
+
+        assert_eq!(shown(ListFilter::default()), [0, 1, 2]);
+        assert_eq!(shown(search("  ")), [0, 1, 2]);
+        assert_eq!(shown(search("CAFE paris")), [0]);
+        assert_eq!(shown(search("terraces")), [0]);
+        assert_eq!(shown(search("why")), [0, 1]);
+        assert_eq!(shown(search("moon café")), [] as [usize; 0]);
+        let status = |s: &[&'static str]| ListFilter {
+            status: s.to_vec(),
+            ..Default::default()
+        };
+        assert_eq!(shown(status(&["rendered"])), [0]);
+        assert_eq!(shown(status(&["stopped"])), [1, 2]);
+        assert_eq!(shown(status(&["published", "stopped"])), [1, 2]);
+        assert_eq!(
+            shown(ListFilter {
+                format: vec![Format::Horizontal, Format::Square],
+                ..Default::default()
+            }),
+            [0, 1]
+        );
+        assert_eq!(
+            shown(ListFilter {
+                status: vec!["stopped"],
+                kind: vec![ProjectKind::Story],
+                ..Default::default()
+            }),
+            [1]
+        );
+        assert_eq!(
+            shown(ListFilter {
+                kind: vec![ProjectKind::Clip],
+                ..Default::default()
+            }),
+            [2]
+        );
+    }
+
+    #[test]
+    fn list_footer_says_what_is_hidden() {
+        assert_eq!(list_footer(5, 5, 5), None);
+        assert_eq!(
+            list_footer(2, 5, 5).unwrap(),
+            "Showing 2 of 5; use --limit to see more."
+        );
+        assert_eq!(list_footer(3, 3, 48).unwrap(), "3 of 48 projects match.");
+        assert_eq!(
+            list_footer(2, 3, 48).unwrap(),
+            "Showing 2 of 3 matching projects (48 in all); use --limit to see more."
+        );
     }
 
     #[test]

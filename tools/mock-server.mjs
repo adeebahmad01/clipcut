@@ -441,6 +441,25 @@ function seed() {
   Object.assign(vs, { status: 'failed', message: 'Kokoro failed', error: 'kokoro: model file kokoro-v1.0.onnx not found (run setup → kokoro)', started_at: ago(1490) });
   projects.set(failed.id, failed);
 
+  // A published square story and a clip, so the home page filters have something to find.
+  const cafe = baseProject('20261006-080000-cafe01', 'Café culture: why Parisians sit facing the street', {
+    created_at: ago(4300), updated_at: ago(30), format: 'square', stages: doneStages(),
+    research: research('Café culture'), hooks: hooks(), chosen_hook: 0, script: script('Why Paris cafés face the street'),
+  });
+  cafe.beats = beats();
+  cafe.voice_track = voiceTrack(cafe.beats);
+  cafe.render = renderOut(cafe);
+  cafe.published = [{ platform: 'youtube', format: 'square', video_id: 'mock123', url: 'https://youtu.be/mock123', privacy: 'unlisted', uploaded_at: ago(25) }];
+  projects.set(cafe.id, cafe);
+
+  const clip = baseProject('20261005-200000-c11p00', 'Clip 1 of "The history of the internet in one talk"', {
+    created_at: ago(5800), updated_at: ago(5700), kind: 'clip', stages: doneStages(), script: script('The first message ever sent online'),
+  });
+  clip.beats = beats();
+  clip.voice_track = voiceTrack(clip.beats);
+  clip.render = renderOut(clip);
+  projects.set(clip.id, clip);
+
   const running = baseProject('20261008-114500-777aaa', 'How Australia lost the Great Emu War', { created_at: ago(1), updated_at: ago(1) });
   projects.set(running.id, running);
   return { projects, runningId: running.id };
@@ -624,6 +643,7 @@ const summary = (p) => ({
   duration_s: p.render?.duration_s ?? null,
   video_url: p.render ? `/api/projects/${p.id}/files/render/final.mp4` : null,
   thumb_url: p.render ? `/api/projects/${p.id}/still?t=1` : null,
+  kind: p.kind || 'story', published: p.published || [],
 });
 const keysView = () => ({
   services: SERVICES.map(([id, label]) => ({
