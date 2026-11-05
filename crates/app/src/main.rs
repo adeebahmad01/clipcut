@@ -93,6 +93,8 @@ enum Command {
         /// Show only the newest N.
         #[arg(long, short = 'n', value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
         limit: Option<usize>,
+        #[command(flatten)]
+        filter: cli::ListFilter,
     },
     /// Show one project: how each stage went, its files and where it was published.
     Show {
@@ -404,7 +406,7 @@ async fn main() -> anyhow::Result<()> {
             cli::change_video(&state, &id, cli::VideoChanges::new(video, no_also)).await?;
             run_headless(&state, &id, Some(Stage::Render), true).await
         }
-        Command::List { limit } => cli::list(&state, limit),
+        Command::List { limit, filter } => cli::list(&state, limit, &filter),
         Command::Show { id, path, json } => cli::show(&state, &id, path, json),
         Command::Export {
             id,
@@ -757,11 +759,45 @@ mod tests {
         lists_all(&STAGES, &Stage::ALL);
         lists_all(&cli::FORMATS, &Format::ALL);
         lists_all(&cli::CAPTIONS, &clipcut_core::timeline::CaptionPreset::ALL);
+        lists_all(
+            &cli::STATUSES,
+            &["running", "stopped", "failed", "rendered", "published"],
+        );
+        use clipcut_core::model::ProjectKind;
+        lists_all(&cli::KINDS, &[ProjectKind::Story, ProjectKind::Clip]);
         use clipcut_core::VisualKind::*;
         lists_all(
             &cli::VISUAL_KINDS,
             &[Youtube, Article, Meme, Gif, Image, Stock, Text],
         );
+    }
+
+    #[test]
+    fn list_takes_filters() {
+        let cli = Cli::try_parse_from([
+            "clipcut",
+            "list",
+            "--status",
+            "Failed,stopped",
+            "--format",
+            "square",
+            "--kind",
+            "clip",
+            "-s",
+            "moon landing",
+            "-n",
+            "3",
+        ])
+        .unwrap();
+        let Some(Command::List { limit, filter }) = cli.command else {
+            panic!("not list")
+        };
+        assert_eq!(limit, Some(3));
+        assert_eq!(filter.status, ["failed", "stopped"]);
+        assert_eq!(filter.format, [Format::Square]);
+        assert_eq!(filter.kind, [clipcut_core::model::ProjectKind::Clip]);
+        assert_eq!(filter.search.as_deref(), Some("moon landing"));
+        assert!(Cli::try_parse_from(["clipcut", "list", "--status", "review"]).is_err());
     }
 
     #[test]

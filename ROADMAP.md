@@ -72,7 +72,7 @@ Let you shape the cut by hand in the browser, check it quickly before the final 
 - [ ] **CC-027 Accessibility pass**: Every page works with a keyboard and a screen reader, with visible focus, labelled controls and announced progress. ([prompt](ROADMAP-PROMPTS.md#cc-027-accessibility-pass))
 - [ ] **CC-028 Light and high-contrast themes**: The app follows your system's light or dark setting, offers a high-contrast mode, and lets you pick its accent color. ([prompt](ROADMAP-PROMPTS.md#cc-028-light-and-high-contrast-themes))
 - [ ] **CC-029 Saved video presets**: Save a format, length, voice, caption style and notes as a named preset and pick it for new videos and batches. ([prompt](ROADMAP-PROMPTS.md#cc-029-saved-video-presets))
-- [ ] **CC-030 Search and filter projects**: Find a project on the home page by topic or title and filter by status, format or kind. ([prompt](ROADMAP-PROMPTS.md#cc-030-search-and-filter-projects))
+- [x] **CC-030 Search and filter projects**: Find a project on the home page by topic or title and filter by status, format or kind. ([prompt](ROADMAP-PROMPTS.md#cc-030-search-and-filter-projects))
 
 ## v0.4: Editing styles and themes
 Status: Later

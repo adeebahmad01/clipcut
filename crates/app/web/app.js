@@ -966,6 +966,58 @@ const EXAMPLES = [
   'The man who sold the Eiffel Tower twice',
 ];
 
+// Home page search, filters and sort. The status words are the ones
+// `clipcut list --status` takes (status_group in cli.rs).
+const STATUS_FILTERS = [['running', 'Running'], ['stopped', 'Stopped'], ['failed', 'Failed'], ['rendered', 'Rendered'], ['published', 'Published']];
+const KIND_FILTERS = [['story', 'Story'], ['clip', 'Clip']];
+const SORTS = [['newest', 'Newest'], ['oldest', 'Oldest'], ['updated', 'Recently updated'], ['longest', 'Longest']];
+const FILTER_GROUPS = [['status', 'Status', STATUS_FILTERS], ['format', 'Format', FORMATS], ['kind', 'Kind', KIND_FILTERS]];
+
+function projectStatus(p) {
+  if (p.running || p.stages.some((s) => s.status === 'running')) return 'running';
+  if (p.stages.some((s) => s.status === 'failed')) return 'failed';
+  if (p.duration_s == null) return 'stopped';
+  return p.published?.length ? 'published' : 'rendered';
+}
+
+/** Lower case without accents, so "cafe" finds "Café". */
+const fold = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+
+/** The filters in the URL: `#/?q=moon&status=failed,stopped&sort=oldest`. */
+function readFilters() {
+  const q = new URLSearchParams(location.hash.split('?')[1] || '');
+  const pick = (key, options) => (q.get(key) || '').split(',').filter((v) => options.some(([id]) => id === v));
+  return {
+    q: q.get('q') || '',
+    ...Object.fromEntries(FILTER_GROUPS.map(([key, , options]) => [key, pick(key, options)])),
+    sort: SORTS.some(([id]) => id === q.get('sort')) ? q.get('sort') : 'newest',
+  };
+}
+function filterHash(f) {
+  const q = new URLSearchParams();
+  if (f.q.trim()) q.set('q', f.q);
+  for (const [key] of FILTER_GROUPS) if (f[key].length) q.set(key, f[key].join(','));
+  if (f.sort !== 'newest') q.set('sort', f.sort);
+  const query = q.toString().replace(/%2C/g, ',');
+  return query ? `#/?${query}` : '#/';
+}
+const filtering = (f) => Boolean(f.q.trim() || FILTER_GROUPS.some(([key]) => f[key].length));
+
+function filterProjects(ps, f) {
+  const words = fold(f.q).split(/\s+/).filter(Boolean);
+  const out = ps.filter((p) => (!f.status.length || f.status.includes(projectStatus(p)))
+    && (!f.format.length || f.format.includes(p.format))
+    && (!f.kind.length || f.kind.includes(p.kind || 'story'))
+    && (!words.length || words.every((w) => fold(`${p.topic} ${p.title || ''}`).includes(w))));
+  const time = (iso) => Date.parse(iso) || 0;
+  const by = {
+    oldest: (a, b) => time(a.created_at) - time(b.created_at),
+    updated: (a, b) => time(b.updated_at) - time(a.updated_at),
+    longest: (a, b) => (b.duration_s ?? -1) - (a.duration_s ?? -1),
+  }[f.sort];
+  return by ? out.sort(by) : out;
+}
+
 function HomeView() {
   const cfg = state.config;
   const form = {
@@ -1158,6 +1210,39 @@ function HomeView() {
 
   const list = h('div', { class: 'pgrid' });
   const listHead = h('div', { class: 'section-head' });
+  let filters = readFilters();
+  let filtersHash = location.hash;
+  const setFilters = (next) => {
+    filters = { ...filters, ...next };
+    filtersHash = filterHash(filters);
+    if (location.hash !== filtersHash) history.replaceState(null, '', filtersHash);
+    syncFilters();
+    update();
+  };
+  const clearFilters = () => setFilters({ q: '', ...Object.fromEntries(FILTER_GROUPS.map(([key]) => [key, []])) });
+  const search = h('input', {
+    id: 'project-search', class: 'input sm', type: 'search', autocomplete: 'off', spellcheck: 'false',
+    placeholder: 'Search topics and titles', 'aria-label': 'Search projects',
+    oninput: (e) => setFilters({ q: e.target.value }),
+    onkeydown: (e) => { if (e.key === 'Escape' && search.value) { e.preventDefault(); setFilters({ q: '' }); } },
+  });
+  const chipGroups = FILTER_GROUPS.map(([key, label, options]) => h('div', { class: 'fchips', role: 'group', 'aria-label': label },
+    options.map(([value, text]) => h('button', {
+      type: 'button', class: 'fchip', 'data-key': key, 'data-value': value, 'aria-pressed': 'false',
+      onclick: () => setFilters({ [key]: filters[key].includes(value) ? filters[key].filter((v) => v !== value) : [...filters[key], value] }),
+    }, text))));
+  const sortSel = h('select', { class: 'select sm', 'aria-label': 'Sort projects', onchange: (e) => setFilters({ sort: e.target.value }) },
+    SORTS.map(([value, text]) => h('option', { value }, text)));
+  const filterBar = h('div', { class: 'pfilters', hidden: true },
+    h('div', { class: 'input-icon pfilter-search' }, icon('search'), search),
+    chipGroups,
+    h('div', { class: 'with-icon pfilter-sort' }, icon('list'), sortSel));
+  function syncFilters() {
+    if (search.value !== filters.q) search.value = filters.q;
+    for (const chip of filterBar.querySelectorAll('.fchip')) chip.setAttribute('aria-pressed', String(filters[chip.dataset.key].includes(chip.dataset.value)));
+    sortSel.value = filters.sort;
+  }
+  syncFilters();
   const el = h('div', { class: 'page home' },
     h('section', { class: 'hero' },
       modeSeg,
@@ -1166,7 +1251,7 @@ function HomeView() {
       composer,
       clipForm,
       ideas),
-    h('section', { class: 'recent' }, listHead, list));
+    h('section', { class: 'recent' }, listHead, filterBar, list));
 
   setTimeout(() => {
     grow(); syncMake(); syncCut();
@@ -1197,9 +1282,20 @@ function HomeView() {
         ? [spinner(), h('span', null, clipLog?.message || 'Reading the video…')]
         : clip.error ? h('span', { class: 'ideas-err' }, icon('alert'), clip.error)
           : h('span', { class: 'muted' }, 'Works with any video that has captions. Each clip renders in the ', h('a', { href: '#/queue' }, 'Queue'), '.'));
+      if (location.hash !== filtersHash && currentRoute.name === 'home') {
+        filters = readFilters();
+        filtersHash = location.hash;
+        syncFilters();
+      }
       const ps = state.projects;
-      patch(listHead, ps ? ps.length : -1, () => [
-        h('h2', null, 'Recent'), ps?.length ? h('span', { class: 'count' }, ps.length) : null,
+      const shown = ps ? filterProjects(ps, filters) : null;
+      const active = Boolean(ps) && filtering(filters);
+      filterBar.hidden = !ps || (ps.length < 2 && !active);
+      patch(listHead, JSON.stringify([ps ? ps.length : -1, active && shown.length]), () => [
+        h('h2', null, 'Recent'),
+        ps?.length && !active ? h('span', { class: 'count' }, ps.length) : null,
+        active ? h('span', { class: 'pfilter-count', 'aria-live': 'polite' }, `${shown.length} of ${ps.length} project${ps.length === 1 ? '' : 's'}`) : null,
+        active ? h('button', { type: 'button', class: 'btn ghost sm', onclick: clearFilters }, icon('x'), 'Clear') : null,
       ]);
       if (state.projectsError && !ps) {
         patch(list, `err:${state.projectsError}`, () => errorState(state.projectsError, refreshProjects));
@@ -1215,9 +1311,15 @@ function HomeView() {
         patch(list, 'empty', () => emptyState('film', 'No videos yet', 'Your projects show up here, with live progress while they build.'));
         return;
       }
+      if (!shown.length) {
+        list.classList.add('single');
+        patch(list, 'nomatch', () => emptyState('search', 'No projects match', 'Try other words, or turn off a filter.',
+          h('button', { type: 'button', class: 'btn', onclick: clearFilters }, icon('x'), 'Clear filters')));
+        return;
+      }
       list.classList.remove('single');
-      if (list._sig === 'loading' || list._sig === 'empty' || String(list._sig).startsWith('err:')) { list.replaceChildren(); list._sig = 'list'; }
-      keyed(list, ps, (p) => p.id, (p) => {
+      if (list._sig !== 'list') { list.replaceChildren(); list._sig = 'list'; }
+      keyed(list, shown, (p) => p.id, (p) => {
         const live = state.live.get(p.id);
         return JSON.stringify([p.updated_at, p.running, p.stages.map((s) => [s.status, s.progress]), p.title, p.thumb_url, p.kind, p.published?.length, p.running && live ? [live.message, live.progress] : 0, Math.floor(Date.now() / 60000)]);
       }, projectCard);

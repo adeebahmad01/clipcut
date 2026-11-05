@@ -69,6 +69,18 @@ When the render finishes, the project page shows the video and a
 Not sure what to make? **Need an idea?** under the topic box lists what is
 trending on Google Trends or in the news. Click one to use it as the topic.
 
+Your projects are listed under **Recent** on the same page, newest first.
+To find one, type part of its topic or title in the search box (case and
+accents don't matter, so *cafe* finds *Café*), or pick status, format and
+kind filters: **Running**, **Stopped** (waiting for your review or stopped
+part way), **Failed**, **Rendered** and **Published**; **9:16**, **16:9**
+and **1:1**; **Story** and **Clip**. Filters in the same row widen the
+list, and filters in different rows narrow it. The sort menu orders by
+newest, oldest, recently updated or longest. The page shows how many
+projects match, with **Clear** to show them all again. Your search and
+filters stay in the page address (`#/?q=moon&status=failed`), so they
+survive a reload and you can bookmark them.
+
 ## The stages
 
 | Stage | What happens |
@@ -356,6 +368,8 @@ clipcut batch topics.txt --publish public --start "2026-10-12 15:00" --every 1d
 ```bash
 clipcut list                                  # every project's ID, status, length and topic
 clipcut list -n 5                             # only the newest five
+clipcut list --status failed,stopped          # only projects that need you
+clipcut list --format square --kind clip -s moon  # filter by format, kind and words
 clipcut show <project-id>                     # one project: stages, files, uploads
 clipcut export <project-id> ~/Videos          # copy its video, captions, thumbnail and credits
 clipcut run <project-id> --from script        # redo script and everything after it
@@ -384,6 +398,15 @@ ID                      STATUS               LENGTH  TOPIC
 
 They are also the folder names under `projects/`, and are shown in the
 app's URL (`#/p/<id>`).
+
+`clipcut list` takes the same filters as the app's project list.
+`--status` is `running`, `stopped`, `failed`, `rendered` or `published`
+(the first word of the STATUS column; `stopped` also covers projects not
+started yet), `--format` is `vertical`, `horizontal` or `square`, and
+`--kind` is `story` or `clip`. Each takes several values separated by
+commas. `--search` (`-s`) keeps projects whose topic or title contains
+every word you give, ignoring case and accents. Under the table ClipCut
+says how many of your projects matched.
 
 `run`, `render`, `publish`, `show`, `export`, `delete`, `duplicate`,
 `stop`, `edit` and `beats` don't need the whole ID. Give its last few

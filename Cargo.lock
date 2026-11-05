@@ -365,6 +365,7 @@ dependencies = [
  "clipcut-sources",
  "clipcut-tts",
  "futures",
+ "icu_normalizer",
  "mime_guess",
  "qrcode",
  "reqwest",
