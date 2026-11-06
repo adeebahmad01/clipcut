@@ -377,6 +377,7 @@ clipcut run <project-id> --from assets --only # only redo visuals
 clipcut render <project-id>                   # re-render
 clipcut render <project-id> --horizontal      # re-render as 16:9
 clipcut delete <project-id>...                # delete projects and their files
+clipcut clean                                 # what uses disk space; --temp, --renders… remove it
 clipcut duplicate <project-id>                # copy a project to try another take
 clipcut edit <project-id> --title "…"         # change the topic, script, title, hashtags…
 clipcut beats <project-id>                    # each beat's visual; lock, redo, pick or replace some
@@ -497,6 +498,40 @@ so it stops anything it is doing with the project first.
 ```bash
 clipcut delete 3fa9c1 b07e44
 clipcut delete latest --yes
+```
+
+`clipcut clean` shows what ClipCut keeps on disk that it can make again,
+and removes the parts you name. Settings → Storage shows the same rows,
+each with a Remove button.
+
+```
+ PART     WHAT                         SIZE
+ cache    Download cache              74 MB
+ renders  Old renders (over 30 days)  420 MB  9 projects
+ temp     Leftover temporary files    3.4 MB  2 items
+ browser  App window browser profile  135 MB
+```
+
+| Flag | Removes |
+|---|---|
+| `--cache` | Downloaded captions, icons, meme templates and topic ideas. They download again when a video needs them. |
+| `--renders` | The `render/` folder of projects rendered more than 30 days ago (`--older-than 2w` or `90d` for another age). The beats, visuals and voiceover stay and the project shows as not rendered, so `clipcut render <id>` makes the video again. YouTube links are kept. |
+| `--temp` | `*.tmp` and `*.part` files and caption download attempts left by a crash or a cancelled download, once they are an hour old. |
+| `--browser` | The app window's Chromium profile. Only while the app isn't running. |
+| `--all` | All of the above. |
+
+It lists what it will remove and asks first; `--yes` (`-y`) skips the
+question and `--dry-run` prints every file and folder it would remove
+without removing anything. Projects that are running, uploading or
+searching for a visual keep their render, and the cache is kept while
+any project runs. `keys.json`, `youtube-oauth.json`, `config.toml`,
+`queue.json`, the voice models, music and sound effects are never touched.
+When the app is running on the same data directory, the CLI asks it to
+do the cleaning, so it skips whatever the app is busy with.
+
+```bash
+clipcut clean --temp --renders --older-than 60d --dry-run
+clipcut clean --all --yes
 ```
 
 `clipcut duplicate` does what the project page's Duplicate button does: it
@@ -738,7 +773,9 @@ render/credits.txt  every source used
 
 `clipcut export <id> <folder>` copies the render files somewhere else under
 the video's title. You can delete a project from the app, with
-`clipcut delete <id>`, or by removing its folder.
+`clipcut delete <id>`, or by removing its folder. To get space back but
+keep the project, `clipcut clean --renders` (or Settings → Storage)
+removes old `render/` folders; `clipcut render <id>` makes them again.
 
 Next to `projects/`, `queue.json` holds the [queue](#the-queue) and
 `youtube-oauth.json` the [YouTube](#publish-to-youtube) client and

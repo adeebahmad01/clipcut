@@ -743,6 +743,20 @@ function parseMultipart(buf, ctype) {
 }
 
 const PATCHABLE = ['topic', 'notes', 'voice', 'autopilot', 'format', 'target_seconds'];
+// Settings → Storage. Sizes are made up; cleaning a part empties it until restart.
+const storageLeft = { cache: 74_000_000, renders: 1, temp: 3_400_000, browser: 135_000_000 };
+function storageView(days) {
+  const old = [365, 90, 30, 7].filter((d) => days <= d).length * storageLeft.renders;
+  const row = (part, bytes, count, kept = []) => ({ part, bytes, count, kept });
+  const rows = [
+    row('cache', storageLeft.cache, storageLeft.cache ? 3 : 0),
+    row('renders', old * 41_500_000, old),
+    row('temp', storageLeft.temp, storageLeft.temp ? 2 : 0),
+    row('browser', 0, 0, ['135 MB kept while ClipCut is running']),
+  ];
+  return { home: '/home/you/.local/share/clipcut', older_than_days: days, rows, items: [] };
+}
+
 
 async function api(req, res, url) {
   const parts = url.pathname.split('/').filter(Boolean).slice(1); // drop "api"
@@ -761,6 +775,16 @@ async function api(req, res, url) {
     const finder = (x, y) => `<path d="M${x} ${y}h7v7h-7zM${x + 1} ${y + 1}v5h5v-5zM${x + 2} ${y + 2}h3v3h-3z" fill-rule="evenodd"/>`;
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 33 33" shape-rendering="crispEdges"><rect width="33" height="33" fill="#fff"/><g fill="#000">${finder(4, 4)}${finder(22, 4)}${finder(4, 22)}<text x="16.5" y="19" font-size="4" text-anchor="middle" font-family="monospace">mock</text></g></svg>`;
     return sendBuf(req, res, Buffer.from(svg), 'image/svg+xml', { 'cache-control': 'no-store' });
+  }
+  if (a === 'storage' && !id && M === 'GET') return json(res, 200, storageView(Number(url.searchParams.get('older_than_days') ?? 30)));
+  if (a === 'storage' && id === 'clean' && M === 'POST') {
+    const { parts: chosen = [], older_than_days: days = 30 } = await jsonBody(req);
+    if (!chosen.length) return err(res, 400, 'pick something to clean');
+    const before = storageView(days);
+    await sleep(500);
+    for (const part of chosen) if (part !== 'browser') storageLeft[part] = 0;
+    const rows = before.rows.map((r) => chosen.includes(r.part) ? r : { ...r, bytes: 0, count: 0, kept: [] });
+    return json(res, 200, { ...before, rows });
   }
   if (a === 'status') return json(res, 200, statusView());
   if (a === 'config') {

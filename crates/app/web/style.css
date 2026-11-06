@@ -970,6 +970,14 @@ main.enter .page { animation: page-in 0.28s var(--ease); }
 .phone-qr h2 { margin-bottom: 4px; }
 .phone-qr p { margin-bottom: 8px; }
 .foot-note { margin-top: 4px; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.storage .warn-text { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+.storage .warn-text .icon { width: 13px; height: 13px; flex: none; }
+.storage-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.storage-actions .select { width: auto; }
+@media (max-width: 560px) {
+  .storage .target { flex-direction: column; align-items: flex-start; }
+  .storage-actions { justify-content: flex-start; }
+}
 
 .services { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 520px), 1fr)); gap: 14px; }
 .svc { padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }

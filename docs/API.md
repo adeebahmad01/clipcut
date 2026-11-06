@@ -21,6 +21,8 @@ snake_case strings). Errors are `{"error": "message"}` with a 4xx/5xx status.
 | GET | `/api/voices` | – | `[{ id, label, engine }]` |
 | POST | `/api/voices/preview` | `{ voice, text }` | `audio/wav` bytes |
 | POST | `/api/setup` | `{ what: "yt-dlp" \| "kokoro" \| "searxng" \| "all" }` | `202 { ok: true }`; progress arrives on SSE with `project_id = "_setup"` |
+| GET | `/api/storage?older_than_days=30` | – | `Storage` (below): what each part of the data directory holds that can be removed |
+| POST | `/api/storage/clean` | `{ parts: ["cache" \| "renders" \| "temp" \| "browser"], older_than_days? }` | `Storage` of what was removed; 400 when `parts` is empty |
 
 `Status`:
 
@@ -42,6 +44,32 @@ listens on a loopback host (`127.0.0.1`, `::1`, `localhost`). A specific
 `checks` covers tools, the TTS engine, the LLM CLI, search (SearXNG/DDG) and
 keys. A failing check carries a `fix` string: a command or a hint, which may
 name a `/api/setup` target.
+
+`Storage`:
+
+```json
+{
+  "home": "/home/me/.local/share/clipcut",
+  "older_than_days": 30,
+  "rows": [
+    { "part": "cache", "bytes": 74000000, "count": 3, "kept": [] },
+    { "part": "renders", "bytes": 41500000, "count": 1, "kept": ["3fa9c1 is busy"] },
+    { "part": "temp", "bytes": 0, "count": 0, "kept": [] },
+    { "part": "browser", "bytes": 0, "count": 0, "kept": ["135 MB kept while ClipCut is running"] }
+  ],
+  "items": [
+    { "part": "renders", "path": "projects/20261001-090000-0a1d00/render", "bytes": 41500000, "project": "20261001-090000-0a1d00" }
+  ]
+}
+```
+
+`rows` always has the four parts in this order; `items` lists each file or
+folder (relative to `home`) that cleaning them removes. `renders` are the
+`render/` folders of projects rendered more than `older_than_days` ago
+(default 30); cleaning one also clears the project's `render` and sets its
+Render stage back to pending. `kept` says why some of a part stays: projects
+that are running, uploading or busy with a visual, the whole cache while any
+project runs, and the app window's profile always, since the app is running.
 
 ## Projects
 

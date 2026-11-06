@@ -243,3 +243,8 @@ podman rm -f clipcut-searxng               # if you used SearXNG
 ```
 
 The second command deletes your projects and saved keys too.
+
+To get disk space back without uninstalling, run `clipcut clean`. It shows
+how much the download cache, old renders, leftover temporary files and the
+app window's browser profile use, and removes the ones you pick (see
+[Usage](Usage.md#the-command-line)).
