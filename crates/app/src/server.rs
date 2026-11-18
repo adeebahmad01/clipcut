@@ -33,6 +33,7 @@ use tower_http::compression::Predicate;
 use tower_http::compression::predicate::{DefaultPredicate, NotForContentType};
 use tower_http::services::ServeFile;
 
+use crate::clean::{self, Part};
 use crate::clips::{self, ClipRequest};
 use crate::doctor;
 use crate::pipeline;
@@ -59,6 +60,8 @@ pub fn router(state: AppState) -> Router {
         .route("/voices", get(voices))
         .route("/voices/preview", post(voice_preview))
         .route("/setup", post(setup))
+        .route("/storage", get(storage))
+        .route("/storage/clean", post(clean_storage))
         .route("/events", get(events))
         .route("/projects", get(list_projects).post(create_project))
         .route(
@@ -950,6 +953,36 @@ async fn delete_project(
     state.store.abort_and_wait(&id).await;
     state.store.delete(&id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct StorageQuery {
+    older_than_days: Option<u32>,
+}
+
+async fn storage(
+    State(state): State<AppState>,
+    Query(q): Query<StorageQuery>,
+) -> ApiResult<Json<clean::Report>> {
+    let days = q.older_than_days.unwrap_or(clean::DEFAULT_RENDER_DAYS);
+    Ok(Json(clean::report(&state, days, true).await?))
+}
+
+#[derive(Deserialize)]
+struct CleanBody {
+    parts: Vec<Part>,
+    older_than_days: Option<u32>,
+}
+
+async fn clean_storage(
+    State(state): State<AppState>,
+    Json(body): Json<CleanBody>,
+) -> ApiResult<Json<clean::Report>> {
+    if body.parts.is_empty() {
+        return Err(ApiError::bad_request("pick something to clean"));
+    }
+    let days = body.older_than_days.unwrap_or(clean::DEFAULT_RENDER_DAYS);
+    Ok(Json(clean::clean(&state, &body.parts, days, true).await?))
 }
 
 #[derive(Deserialize, Default)]
@@ -2734,5 +2767,48 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let response = call(&state, "GET", &format!("{download}?file=passwd"), json!(null)).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    #[tokio::test]
+    async fn storage_lists_and_cleans_the_home_but_keeps_the_window_profile() {
+        let home = TestHome::new();
+        let state = home.state();
+        let cache = state.paths.cache();
+        std::fs::create_dir_all(cache.join("app-window/Default")).unwrap();
+        std::fs::write(cache.join("app-window/Default/Cookies"), [0u8; 500]).unwrap();
+        std::fs::write(cache.join("imgflip.json"), [0u8; 200]).unwrap();
+
+        let response = call(&state, "GET", "/api/storage", serde_json::json!(null)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["older_than_days"], 30);
+        assert_eq!(body["rows"][0]["part"], "cache");
+        assert_eq!(body["rows"][0]["bytes"], 200);
+        assert_eq!(body["rows"][3]["part"], "browser");
+        assert_eq!(
+            body["rows"][3]["kept"][0],
+            "500 B kept while ClipCut is running"
+        );
+
+        let response = call(
+            &state,
+            "POST",
+            "/api/storage/clean",
+            serde_json::json!({ "parts": [] }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response = call(
+            &state,
+            "POST",
+            "/api/storage/clean",
+            serde_json::json!({ "parts": ["cache", "browser"], "older_than_days": 7 }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["items"][0]["path"], "cache/imgflip.json");
+        assert_eq!(body["items"].as_array().unwrap().len(), 1);
+        assert!(!cache.join("imgflip.json").exists());
+        assert!(cache.join("app-window/Default/Cookies").exists());
     }
 }

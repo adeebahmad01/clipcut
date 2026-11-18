@@ -1,6 +1,7 @@
 //! ClipCut: topic in, short edited video out. `clipcut` starts the web app;
 //! the other subcommands run the same pipeline headless.
 
+mod clean;
 mod cli;
 mod clips;
 mod doctor;
@@ -132,6 +133,33 @@ enum Command {
         /// Also delete projects marked as running.
         #[arg(long)]
         force: bool,
+    },
+    /// Show what uses disk space and remove what can be made again: `clipcut clean --temp`.
+    Clean {
+        /// Remove the download cache (captions, icons, meme templates, topic ideas).
+        #[arg(long)]
+        cache: bool,
+        /// Remove old renders, keeping each project's beats and voice so `clipcut render` makes the video again.
+        #[arg(long)]
+        renders: bool,
+        /// Which renders are old: rendered more than this long ago, e.g. 30d or 2w.
+        #[arg(long, value_name = "AGE", default_value = "30d", value_parser = clean::parse_days)]
+        older_than: u32,
+        /// Remove leftovers from crashes and cancelled downloads (*.tmp, *.part, caption attempts).
+        #[arg(long)]
+        temp: bool,
+        /// Remove the app window's browser profile (only while the app isn't running).
+        #[arg(long)]
+        browser: bool,
+        /// Remove all of the above.
+        #[arg(long)]
+        all: bool,
+        /// List what would be removed without removing it.
+        #[arg(long)]
+        dry_run: bool,
+        /// Don't ask first.
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
     /// Copy a project to try another take, keeping its research, hook and script.
     Duplicate {
@@ -424,6 +452,35 @@ async fn main() -> anyhow::Result<()> {
         ),
         Command::Delete { ids, yes, force } => {
             cli::delete(&state, cli::DeleteArgs { ids, yes, force }).await
+        }
+        Command::Clean {
+            cache,
+            renders,
+            older_than,
+            temp,
+            browser,
+            all,
+            dry_run,
+            yes,
+        } => {
+            let parts = [
+                (cache, clean::Part::Cache),
+                (renders, clean::Part::Renders),
+                (temp, clean::Part::Temp),
+                (browser, clean::Part::Browser),
+            ];
+            let parts = parts
+                .into_iter()
+                .filter(|(on, _)| all || *on)
+                .map(|(_, p)| p)
+                .collect();
+            let args = clean::CleanArgs {
+                parts,
+                older_than_days: older_than,
+                dry_run,
+                yes,
+            };
+            clean::run(&state, args).await
         }
         Command::Duplicate { id } => cli::duplicate(&state, &id).await,
         Command::Stop { ids, force } => cli::stop(&state, cli::StopArgs { ids, force }).await,

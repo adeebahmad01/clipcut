@@ -137,6 +137,15 @@ function fmtDuration(s) {
   s = Math.round(s);
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
 }
+/** `512 B`, `12 KB`, `420 MB`, `1.3 GB`, like `clipcut`'s sizes. */
+function fmtBytes(n) {
+  if (n < 1000) return `${n} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let v = n / 1000;
+  let i = 0;
+  while (v >= 999.5 && i < units.length - 1) { v /= 1000; i++; }
+  return `${v < 9.95 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+}
 function relTime(iso) {
   if (!iso) return '';
   const d = (Date.now() - new Date(iso).getTime()) / 1000;
@@ -2647,7 +2656,7 @@ function QueueView() {
 
 // ---------------------------------------------------------- settings view --
 
-const SETTINGS_TABS = [['setup', 'Setup', 'wrench'], ['keys', 'API keys', 'key'], ['prefs', 'Preferences', 'sliders'], ['youtube', 'YouTube', 'send']];
+const SETTINGS_TABS = [['setup', 'Setup', 'wrench'], ['keys', 'API keys', 'key'], ['prefs', 'Preferences', 'sliders'], ['youtube', 'YouTube', 'send'], ['storage', 'Storage', 'layers']];
 const GCP = 'https://console.cloud.google.com';
 const SETUP_TARGETS = [
   ['yt-dlp', 'yt-dlp', 'Downloads short YouTube cuts. Standalone binary, no Python.'],
@@ -2659,7 +2668,7 @@ const KEY_STATE = { ready: ['Ready', 'ok'], cooling_down: ['Cooling down', 'warn
 
 function SettingsView(initialTab) {
   const ui = { tab: SETTINGS_TABS.some(([t]) => t === initialTab) ? initialTab : 'setup', keyEdits: {}, cfg: null, cfgDirty: false, cfgSaving: false,
-    yt: { client: '', paste: '', busy: null, poll: null } };
+    yt: { client: '', paste: '', busy: null, poll: null }, store: { report: null, error: null, days: 30, busy: null, loading: false } };
   const tabs = h('div', { class: 'tabs', role: 'tablist', 'aria-label': 'Settings sections' });
   const panes = Object.fromEntries(SETTINGS_TABS.map(([t]) => [t, h('section', { class: `pane spane-${t}`, role: 'tabpanel', id: `spane-${t}`,
     'aria-labelledby': `stab-${t}`, tabindex: 0, hidden: true })]));
@@ -2695,7 +2704,7 @@ function SettingsView(initialTab) {
       },
     }, icon(ic), label, t === 'setup' && state.status && !state.status.ready ? h('span', { class: 'count warn' }, state.status.checks.filter((c) => !c.ok && c.required !== false).length) : null)));
     for (const [t, pane] of Object.entries(panes)) pane.hidden = t !== ui.tab;
-    ({ setup: renderSetup, keys: renderKeys, prefs: renderPrefs, youtube: renderYoutube })[ui.tab](panes[ui.tab]);
+    ({ setup: renderSetup, keys: renderKeys, prefs: renderPrefs, youtube: renderYoutube, storage: renderStorage })[ui.tab](panes[ui.tab]);
   }
 
   // ---- setup / doctor
@@ -2772,6 +2781,79 @@ function SettingsView(initialTab) {
             h('p', { class: 'muted' }, 'Scan this with the camera of a phone on the same Wi-Fi to open ClipCut there.'),
             h('a', { class: 'link', href: s.network_url }, s.network_url))) : null,
         h('p', { class: 'muted sm foot-note' }, `ClipCut ${s.version} · data in `, h('code', null, s.home)),
+      ];
+    });
+  }
+
+  // ---- storage
+  async function loadStorage() {
+    const st = ui.store;
+    if (st.loading) return;
+    st.loading = true;
+    update();
+    try { st.report = await api('GET', `/storage?older_than_days=${st.days}`); st.error = null; } catch (e) { st.error = e.message; }
+    st.loading = false;
+    update();
+  }
+  function renderStorage(pane) {
+    const st = ui.store;
+    if (!st.report && !st.error && !st.loading) loadStorage();
+    patch(pane, JSON.stringify([st.report, st.error, st.days, st.busy, st.loading]), () => {
+      const r = st.report;
+      if (st.error && !r) return errorState(st.error, loadStorage);
+      if (!r) return h('div', { class: 'loading-page' }, spinner('lg'), 'Measuring what ClipCut keeps on disk…');
+      const row = (part) => r.rows.find((x) => x.part === part);
+      const free = r.rows.reduce((n, x) => n + x.bytes, 0);
+      const clear = async (part, label) => {
+        const x = row(part);
+        if (st.busy || !x?.count) return;
+        const body = part === 'renders'
+          ? `The videos, thumbnails and caption files of ${x.count} project${x.count === 1 ? '' : 's'} go. Their beats and voiceover stay, so Render makes them again.`
+          : 'They download again the next time a video needs them.';
+        if (part !== 'temp' && !(await confirmDialog({ title: `Remove ${label.toLowerCase()} (${fmtBytes(x.bytes)})?`, body, ok: 'Remove', danger: true }))) return;
+        st.busy = part;
+        update();
+        try {
+          const done = await api('POST', '/storage/clean', { parts: [part], older_than_days: st.days });
+          const freed = done.rows.reduce((n, d) => n + d.bytes, 0);
+          const kept = done.rows.flatMap((d) => d.kept);
+          toast(`Freed ${fmtBytes(freed)}${kept.length ? `; ${kept.join('; ')}` : ''}`, kept.length ? 'error' : 'info');
+        } catch (e) { toast(e.message, 'error'); }
+        st.busy = null;
+        st.report = null;
+        loadStorage();
+      };
+      const parts = [
+        ['cache', 'Download cache', 'Captions, icons, meme templates and topic ideas fetched for past videos. They download again when needed.'],
+        ['renders', 'Old renders', 'Videos, thumbnails and caption files of projects rendered a while ago. Their beats and voiceover stay, so Render makes them again.'],
+        ['temp', 'Leftover temporary files', 'Half-finished downloads and saves left by a crash or a cancelled run.'],
+        ['browser', 'App window browser profile', ['The app window’s own Chromium data. It can only go while ClipCut is closed: run ', h('code', null, 'clipcut clean --browser'), '.']],
+      ];
+      const days = h('select', { id: 'storage-days', class: 'select sm', 'aria-label': 'Renders older than', disabled: !!st.busy,
+        onchange: (e) => { st.days = Number(e.target.value); st.report = null; loadStorage(); } },
+      [7, 30, 90, 365].map((d) => h('option', { value: d, selected: d === st.days }, `over ${d} days`)));
+      return [
+        h('div', { class: `doctor-head card ${free ? 'warn' : 'ok'}` },
+          h('div', { class: 'doctor-icon' }, icon(free ? 'layers' : 'check')),
+          h('div', { class: 'grow' },
+            h('h2', null, free ? `${fmtBytes(free)} can be freed` : 'Nothing to clean up'),
+            h('p', { class: 'muted' }, 'Keys, settings, the queue, voice models and music are never touched.')),
+          h('button', { class: 'btn ghost sm', disabled: st.loading || !!st.busy, onclick: () => { st.report = null; loadStorage(); } },
+            st.loading ? spinner() : icon('rerun'), 'Re-check')),
+        h('div', { class: 'setup card' },
+          h('div', { class: 'targets storage' }, parts.map(([part, label, desc]) => {
+            const x = row(part) || { bytes: 0, count: 0, kept: [] };
+            const remove = part === 'browser' ? null : h('button', { class: 'btn sm', disabled: !!st.busy || !x.count, onclick: () => clear(part, label) },
+              st.busy === part ? spinner() : icon('trash'), 'Remove');
+            return h('div', { class: 'target' },
+              h('div', { class: 'grow' },
+                h('div', { class: 'target-name' }, label, x.count || !x.kept.length ? h('span', { class: 'tag' }, fmtBytes(x.bytes)) : null,
+                  part === 'renders' && x.count ? h('span', { class: 'muted sm' }, `${x.count} project${x.count === 1 ? '' : 's'}`) : null),
+                h('p', { class: 'muted sm' }, desc),
+                x.kept.map((why) => h('p', { class: 'warn-text sm' }, icon('info'), why))),
+              part === 'renders' ? h('div', { class: 'storage-actions' }, days, remove) : remove);
+          }))),
+        h('p', { class: 'muted sm foot-note' }, 'The same from a terminal: ', h('code', null, 'clipcut clean'), ' · data in ', h('code', null, r.home)),
       ];
     });
   }

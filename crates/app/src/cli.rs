@@ -169,7 +169,7 @@ fn privacy_plan(
 // Talking to a running app
 
 /// The API of the app running on this machine, if any.
-async fn running_app(state: &AppState) -> Option<String> {
+pub(crate) async fn running_app(state: &AppState) -> Option<String> {
     app_on(state.config().server.port).await
 }
 
@@ -184,7 +184,11 @@ async fn app_on(port: u16) -> Option<String> {
     resp.status().is_success().then_some(base)
 }
 
-async fn api(method: reqwest::Method, url: &str, body: Option<Value>) -> anyhow::Result<Value> {
+pub(crate) async fn api(
+    method: reqwest::Method,
+    url: &str,
+    body: Option<Value>,
+) -> anyhow::Result<Value> {
     let mut req = reqwest::Client::new().request(method, url);
     if let Some(body) = body {
         req = req.json(&body);

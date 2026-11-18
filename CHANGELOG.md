@@ -8,6 +8,14 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `clipcut clean` and Settings → Storage show how much space the download
+  cache, old renders, leftover temporary files and the app window's
+  browser profile take, and remove the ones you pick (`--cache`,
+  `--renders --older-than 30d`, `--temp`, `--browser`, `--all`). It asks
+  first unless you pass `--yes`, and `--dry-run` lists every file it would
+  remove. A cleaned project keeps its beats and voiceover, so
+  `clipcut render` makes the video again. Running projects are skipped, and
+  keys, settings, the queue, voice models and music are never touched.
 - Search and filter projects on the home page: a search box matches topics
   and titles as you type (ignoring case and accents), chips filter by
   status, format and kind, and a menu sorts by newest, oldest, recently
