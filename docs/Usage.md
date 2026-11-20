@@ -383,6 +383,7 @@ clipcut edit <project-id> --title "…"         # change the topic, script, titl
 clipcut beats <project-id>                    # each beat's visual; lock, redo, pick or replace some
 clipcut stop <project-id>...                  # stop projects the app is making
 clipcut doctor                                # check every dependency
+clipcut doctor --report                       # write a redacted bug report file with logs
 clipcut setup all                             # or: yt-dlp, kokoro, searxng
 ```
 

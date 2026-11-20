@@ -39,6 +39,7 @@ use crate::doctor;
 use crate::pipeline;
 use crate::publish::{self, AuthStatus, ClientBody};
 use crate::queue::{self, AddBody, PublishPlan, QueueItem, QueueState};
+use crate::report;
 use crate::state::{AppState, BeatClaim, ServerEvent};
 
 pub(crate) const MAX_UPLOAD_BYTES: usize = 256 * 1024 * 1024;
@@ -54,6 +55,7 @@ pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/status", get(status))
         .route("/status/qr.svg", get(status_qr))
+        .route("/report", get(get_report))
         .route("/config", get(get_config).put(put_config))
         .route("/keys", get(get_keys))
         .route("/keys/{service}", put(put_keys))
@@ -371,6 +373,25 @@ async fn status_qr(State(state): State<AppState>) -> ApiResult<Response> {
             (header::CACHE_CONTROL, "no-store"),
         ],
         svg,
+    )
+        .into_response())
+}
+
+/// Downloadable bug report containing doctor checks, tool versions, masked config and recent logs.
+async fn get_report(State(state): State<AppState>) -> ApiResult<Response> {
+    let content = report::generate(&state).await?;
+    let date = chrono::Local::now().format("%Y-%m-%d");
+    let filename = format!("clipcut-report-{date}.txt");
+    Ok((
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (
+                header::CONTENT_DISPOSITION,
+                &format!("attachment; filename=\"{filename}\""),
+            ),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        content,
     )
         .into_response())
 }
@@ -1081,7 +1102,10 @@ pub fn duplicate(src: &Project) -> Project {
     for s in &src.stages {
         let keep = match s.stage {
             Stage::Research | Stage::Hooks | Stage::Script => {
-                matches!(s.status, clipcut_core::Status::Done | clipcut_core::Status::Skipped)
+                matches!(
+                    s.status,
+                    clipcut_core::Status::Done | clipcut_core::Status::Skipped
+                )
             }
             Stage::Beats => src.kind == ProjectKind::Clip,
             _ => false,
@@ -1641,8 +1665,7 @@ async fn put_youtube_client(
     State(state): State<AppState>,
     Json(body): Json<ClientBody>,
 ) -> ApiResult<Json<AuthStatus>> {
-    let (client_id, client_secret) =
-        publish::parse_client(&body).map_err(ApiError::bad_request)?;
+    let (client_id, client_secret) = publish::parse_client(&body).map_err(ApiError::bad_request)?;
     state.publish.set_client(client_id, client_secret).await?;
     Ok(Json(state.publish.status()))
 }
@@ -1826,7 +1849,9 @@ fn validate_clip_body(body: &ClipBody) -> Result<(), String> {
     }
     if let Some(plan) = &body.publish {
         if !body.req.start {
-            return Err("publish needs start: the clips publish when the queue renders them".into());
+            return Err(
+                "publish needs start: the clips publish when the queue renders them".into(),
+            );
         }
         queue::validate_plan(plan)?;
     }
@@ -1834,7 +1859,9 @@ fn validate_clip_body(body: &ClipBody) -> Result<(), String> {
     if body.job.as_ref().is_some_and(|j| {
         j.is_empty()
             || j.len() > 40
-            || !j.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            || !j
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
     }) {
         return Err("job must be 1–40 letters, digits, - or _".into());
     }
@@ -2373,7 +2400,10 @@ mod tests {
     async fn error_of(response: Response) -> (StatusCode, String) {
         let status = response.status();
         let body = response_json(response).await;
-        (status, body["error"].as_str().unwrap_or_default().to_string())
+        (
+            status,
+            body["error"].as_str().unwrap_or_default().to_string(),
+        )
     }
 
     #[tokio::test]
@@ -2422,7 +2452,11 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         let added = response_json(response).await;
-        assert_eq!(added.as_array().unwrap().len(), 2, "blank topics are skipped");
+        assert_eq!(
+            added.as_array().unwrap().len(),
+            2,
+            "blank topics are skipped"
+        );
         assert_eq!(added[0]["topic"], "First");
         assert_eq!(added[0]["format"], "square");
         assert_eq!(added[0]["caption_preset"], "hormozi");
@@ -2433,18 +2467,35 @@ mod tests {
         assert_eq!(response_json(response).await["paused"], true);
         assert!(state.queue.is_idle(), "a paused queue is idle");
 
-        for (method, path) in [("DELETE", "/api/queue/nope"), ("POST", "/api/queue/nope/retry")] {
+        for (method, path) in [
+            ("DELETE", "/api/queue/nope"),
+            ("POST", "/api/queue/nope/retry"),
+        ] {
             let response = call(&state, method, path, json!({})).await;
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
         }
-        let response = call(&state, "POST", &format!("/api/queue/{first}/retry"), json!({})).await;
-        assert_eq!(response.status(), StatusCode::OK, "retrying a waiting item is a no-op");
+        let response = call(
+            &state,
+            "POST",
+            &format!("/api/queue/{first}/retry"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "retrying a waiting item is a no-op"
+        );
         let response = call(&state, "DELETE", &format!("/api/queue/{first}"), json!({})).await;
         let left = response_json(response).await;
         assert_eq!(left["items"].as_array().unwrap().len(), 1);
         assert_eq!(left["items"][0]["topic"], "Second");
         let response = call(&state, "POST", "/api/queue/clear", json!({})).await;
-        assert_eq!(response_json(response).await["removed"], 0, "waiting items stay");
+        assert_eq!(
+            response_json(response).await["removed"],
+            0,
+            "waiting items stay"
+        );
         assert_eq!(state.queue.snapshot().items.len(), 1);
     }
 
@@ -2545,7 +2596,11 @@ mod tests {
         assert_eq!(status["configured"], false);
         assert_eq!(status["connected"], false);
         let response = call(&state, "POST", "/api/publish/youtube/connect", json!({})).await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "needs a client first");
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "needs a client first"
+        );
 
         for body in [
             json!({}),
@@ -2583,8 +2638,18 @@ mod tests {
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         }
         let response = call(&state, "DELETE", "/api/publish/youtube", json!(null)).await;
-        assert_eq!(response_json(response).await["configured"], true, "keeps the client");
-        let response = call(&state, "DELETE", "/api/publish/youtube?all=true", json!(null)).await;
+        assert_eq!(
+            response_json(response).await["configured"],
+            true,
+            "keeps the client"
+        );
+        let response = call(
+            &state,
+            "DELETE",
+            "/api/publish/youtube?all=true",
+            json!(null),
+        )
+        .await;
         assert_eq!(response_json(response).await["configured"], false);
     }
 
@@ -2593,7 +2658,12 @@ mod tests {
         let home = TestHome::new();
         let state = home.state();
         let long_q = "q".repeat(201);
-        for query in ["geo=USA", "geo=1x", "source=nope", &format!("source=news&q={long_q}")] {
+        for query in [
+            "geo=USA",
+            "geo=1x",
+            "source=nope",
+            &format!("source=news&q={long_q}"),
+        ] {
             let response = call(&state, "GET", &format!("/api/ideas?{query}"), json!(null)).await;
             assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
         }
@@ -2655,7 +2725,11 @@ mod tests {
             json!({"title": "A better title", "caption_preset": "karaoke"}),
         )
         .await;
-        assert_eq!(response.status(), StatusCode::OK, "metadata and styling stay editable");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "metadata and styling stay editable"
+        );
         let saved = state.store.get(&clip.id).unwrap();
         assert_eq!(saved.caption_preset, Some(CaptionPreset::Karaoke));
         assert_eq!(saved.script.as_ref().unwrap().title, "A better title");
@@ -2676,7 +2750,11 @@ mod tests {
         let response = call(&state, "PATCH", &path, json!({"title": "Kept style"})).await;
         assert_eq!(response.status(), StatusCode::OK);
         let saved = state.store.get(&clip.id).unwrap();
-        assert_eq!(saved.caption_preset, Some(CaptionPreset::Karaoke), "left out keeps it");
+        assert_eq!(
+            saved.caption_preset,
+            Some(CaptionPreset::Karaoke),
+            "left out keeps it"
+        );
         let response = call(&state, "PATCH", &path, json!({"caption_preset": null})).await;
         assert_eq!(response.status(), StatusCode::OK);
         let saved = state.store.get(&clip.id).unwrap();
@@ -2715,7 +2793,10 @@ mod tests {
         let response = call(&state, "PATCH", &path, json!({"format": "square"})).await;
         assert_eq!(response.status(), StatusCode::OK);
         let saved = state.store.get(&project.id).unwrap();
-        assert!(saved.extra_formats.is_empty(), "the main format isn't an extra");
+        assert!(
+            saved.extra_formats.is_empty(),
+            "the main format isn't an extra"
+        );
 
         let mut project = finished_project();
         project.extra_formats = vec![Format::Square];
@@ -2745,11 +2826,23 @@ mod tests {
         for (file, name, body) in [
             ("", "a-fixture-topic.mp4", "final.mp4"),
             ("?file=vertical", "a-fixture-topic.mp4", "final.mp4"),
-            ("?file=square", "a-fixture-topic-square.mp4", "final-square.mp4"),
+            (
+                "?file=square",
+                "a-fixture-topic-square.mp4",
+                "final-square.mp4",
+            ),
             ("?file=srt", "a-fixture-topic.srt", "captions.srt"),
             ("?file=vtt", "a-fixture-topic.vtt", "captions.vtt"),
-            ("?file=thumb", "a-fixture-topic-thumbnail.jpg", "thumbnail.jpg"),
-            ("?file=credits", "a-fixture-topic-credits.txt", "credits.txt"),
+            (
+                "?file=thumb",
+                "a-fixture-topic-thumbnail.jpg",
+                "thumbnail.jpg",
+            ),
+            (
+                "?file=credits",
+                "a-fixture-topic-credits.txt",
+                "credits.txt",
+            ),
         ] {
             let response = call(&state, "GET", &format!("{download}{file}"), json!(null)).await;
             assert_eq!(response.status(), StatusCode::OK, "{file}");
@@ -2763,9 +2856,21 @@ mod tests {
                 .unwrap();
             assert_eq!(&bytes[..], body.as_bytes());
         }
-        let response = call(&state, "GET", &format!("{download}?file=horizontal"), json!(null)).await;
+        let response = call(
+            &state,
+            "GET",
+            &format!("{download}?file=horizontal"),
+            json!(null),
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        let response = call(&state, "GET", &format!("{download}?file=passwd"), json!(null)).await;
+        let response = call(
+            &state,
+            "GET",
+            &format!("{download}?file=passwd"),
+            json!(null),
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
     #[tokio::test]
@@ -2810,5 +2915,30 @@ mod tests {
         assert_eq!(body["items"].as_array().unwrap().len(), 1);
         assert!(!cache.join("imgflip.json").exists());
         assert!(cache.join("app-window/Default/Cookies").exists());
+    }
+
+    #[tokio::test]
+    async fn get_report_downloads_redacted_report() {
+        let home = TestHome::new();
+        let state = home.state();
+        let response = call(&state, "GET", "/api/report", serde_json::json!(null)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/plain; charset=utf-8"
+        );
+        let disp = response
+            .headers()
+            .get(header::CONTENT_DISPOSITION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(disp.starts_with("attachment; filename=\"clipcut-report-"));
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(text.contains("ClipCut Bug Report"));
+        assert!(text.contains("Doctor checks"));
     }
 }

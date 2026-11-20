@@ -309,6 +309,14 @@ pub async fn auto_setup(state: &AppState) {
     state.refresh_tools();
 }
 
+/// Write a full bug report file with sensitive information redacted.
+pub async fn write_report(
+    state: &AppState,
+    dest: Option<std::path::PathBuf>,
+) -> anyhow::Result<std::path::PathBuf> {
+    crate::report::write_to_file(state, dest).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

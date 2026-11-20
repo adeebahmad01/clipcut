@@ -2745,7 +2745,8 @@ function SettingsView(initialTab) {
             h('h2', null, s.ready ? 'Ready to make videos' : `${required.length} required check${required.length === 1 ? '' : 's'} to fix`),
             h('p', { class: 'muted' }, s.ready ? optional.length ? `Required checks pass. ${optional.length} optional enhancement${optional.length === 1 ? '' : 's'} unavailable; fallback sources or voices may be used.` : 'Every check passes. Make some videos.'
               : 'Fix required tools before rendering. Optional sources can use fallbacks.')),
-          h('button', { class: 'btn ghost sm', onclick: () => { refreshStatus(); toast('Re-checked'); } }, icon('rerun'), 'Re-check')),
+          h('button', { class: 'btn ghost sm', onclick: () => { refreshStatus(); toast('Re-checked'); } }, icon('rerun'), 'Re-check'),
+          h('a', { class: 'btn ghost sm', href: '/api/report', download: '' }, icon('download'), 'Save bug report')),
         h('ul', { class: 'checks card' }, s.checks.map((c) => h('li', { class: `check ${c.ok ? 'ok' : 'bad'}` },
           h('span', { class: 'check-icon' }, icon(c.ok ? 'check' : 'x')),
           h('div', { class: 'check-body' },
