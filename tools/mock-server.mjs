@@ -786,6 +786,17 @@ async function api(req, res, url) {
     const rows = before.rows.map((r) => chosen.includes(r.part) ? r : { ...r, bytes: 0, count: 0, kept: [] });
     return json(res, 200, { ...before, rows });
   }
+  if (a === 'report' && M === 'GET') {
+    const date = new Date().toISOString().slice(0, 10);
+    const filename = `clipcut-report-${date}.txt`;
+    const reportText = `ClipCut Bug Report\nGenerated: ${new Date().toISOString()}\nVersion: 0.2.0\nOS: mock\n\nDoctor checks:\nall ok\n`;
+    res.writeHead(200, {
+      'content-type': 'text/plain; charset=utf-8',
+      'content-disposition': `attachment; filename="${filename}"`,
+      'cache-control': 'no-store',
+    });
+    return res.end(reportText);
+  }
   if (a === 'status') return json(res, 200, statusView());
   if (a === 'config') {
     if (M === 'GET') return json(res, 200, config);

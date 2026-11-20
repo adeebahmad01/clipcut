@@ -5,11 +5,13 @@ mod clean;
 mod cli;
 mod clips;
 mod doctor;
+mod logging;
 mod net;
 mod pipeline;
 mod publish;
 mod qr;
 mod queue;
+mod report;
 mod server;
 mod state;
 mod store;
@@ -23,7 +25,6 @@ use chrono::{DateTime, Utc};
 use clap::{CommandFactory, Parser, Subcommand, ValueHint};
 use clipcut_core::config::Format;
 use clipcut_core::{Paths, Project, Stage, Status};
-use tracing_subscriber::EnvFilter;
 
 use crate::state::AppState;
 
@@ -313,7 +314,11 @@ enum Command {
         json: bool,
     },
     /// Check tools, models, search and keys.
-    Doctor,
+    Doctor {
+        /// Write a bug report to clipcut-report-<date>.txt.
+        #[arg(long)]
+        report: bool,
+    },
     /// Install free components: yt-dlp, kokoro, searxng or all.
     Setup {
         #[arg(default_value = "all", value_parser = SETUP_TARGETS)]
@@ -341,13 +346,6 @@ fn parse_stage(s: &str) -> Result<Stage, String> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info,tower_http=warn,hyper=warn")),
-        )
-        .with_target(false)
-        .init();
     let cli = Cli::parse();
     let command = match cli.command {
         // Completions don't need (or create) the data directory.
@@ -355,9 +353,15 @@ async fn main() -> anyhow::Result<()> {
             print_completions(shell, &mut std::io::stdout());
             return Ok(());
         }
+        command => command,
+    };
+    let paths = Paths::resolve(cli.home);
+    let _ = paths.ensure();
+    let _ = crate::logging::init_logging(paths.log_file());
+
+    let command = match command {
         // Config only needs config.toml, which may be the reason the app won't load.
         Some(Command::Config { action, path, json }) => {
-            let paths = Paths::resolve(cli.home);
             if path {
                 println!("{}", paths.config_file().display());
                 return Ok(());
@@ -366,11 +370,11 @@ async fn main() -> anyhow::Result<()> {
         }
         // Keys only need keys.json.
         Some(Command::Keys { action, json }) => {
-            return cli::keys(&Paths::resolve(cli.home), action, json).await;
+            return cli::keys(&paths, action, json).await;
         }
         command => command,
     };
-    let state = AppState::load(Paths::resolve(cli.home))?;
+    let state = AppState::load(paths)?;
     match command.unwrap_or(Command::Serve {
         no_window: false,
         no_qr: false,
@@ -554,7 +558,12 @@ async fn main() -> anyhow::Result<()> {
             limit,
         } => cli::ideas(&state, news, q, &geo, limit).await,
         Command::Voices { action, json } => cli::voices(&state, action, json).await,
-        Command::Doctor => {
+        Command::Doctor { report } => {
+            if report {
+                let report_path = doctor::write_report(&state, None).await?;
+                println!("Wrote bug report to {}", report_path.display());
+                return Ok(());
+            }
             let checks = doctor::checks(&state).await;
             for c in &checks {
                 let mark = if c.ok {

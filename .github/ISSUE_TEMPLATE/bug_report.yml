@@ -10,22 +10,17 @@ body:
     validations:
       required: true
   - type: textarea
-    id: doctor
+    id: report
     attributes:
-      label: Output of `clipcut doctor`
+      label: Diagnostic report (`clipcut doctor --report`)
+      description: Run `clipcut doctor --report` (or click "Save bug report" in Settings → Setup) and attach or paste the contents of `clipcut-report-<date>.txt`. It contains doctor checks, tool versions, masked config, and recent logs with sensitive keys redacted.
       render: text
     validations:
       required: true
-  - type: textarea
-    id: logs
-    attributes:
-      label: Log lines around the error
-      description: Run with `RUST_LOG=debug clipcut` for more detail. Remove anything private.
-      render: text
   - type: input
     id: version
     attributes:
       label: Version and OS
-      placeholder: clipcut 0.1.0, Ubuntu 24.04 x86_64
+      placeholder: clipcut 0.2.0, Ubuntu 24.04 x86_64
     validations:
       required: true

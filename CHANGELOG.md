@@ -8,6 +8,17 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `clipcut doctor --report` and Settings → Setup write a bug report file
+  (`clipcut-report-<date>.txt`) containing system info, doctor checks, tool
+  versions, masked configuration, key states without key text, the last
+  500 log lines, and the project list without topics or scripts. Private
+  keys, OAuth secrets, tokens, cookies and email addresses are automatically
+  redacted.
+- Rotating log files in `<home>/logs/clipcut.log` at info level (or
+  `RUST_LOG`), rotating at 5 MB and keeping up to three old files.
+- `GET /api/report` and a "Save bug report" button in Settings → Setup to
+  download the report file directly from the web app.
+
 - `clipcut clean` and Settings → Storage show how much space the download
   cache, old renders, leftover temporary files and the app window's
   browser profile take, and remove the ones you pick (`--cache`,

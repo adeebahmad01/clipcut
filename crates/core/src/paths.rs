@@ -25,6 +25,7 @@ impl Paths {
             self.sfx(),
             self.music(),
             self.searxng(),
+            self.logs(),
         ] {
             std::fs::create_dir_all(dir)?;
         }
@@ -74,6 +75,14 @@ impl Paths {
     /// SearXNG settings mounted into the podman container.
     pub fn searxng(&self) -> PathBuf {
         self.home.join("searxng")
+    }
+    /// Log files and rotating archives.
+    pub fn logs(&self) -> PathBuf {
+        self.home.join("logs")
+    }
+    /// Primary log file path.
+    pub fn log_file(&self) -> PathBuf {
+        self.logs().join("clipcut.log")
     }
 }
 
