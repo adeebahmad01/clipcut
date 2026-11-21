@@ -31,6 +31,7 @@ pub use captions::{best_moment, parse_vtt};
 pub use ideas::{Idea, IdeaSource, parse_trends_rss};
 pub use providers::rank_memes;
 pub use search::{parse_ddg_html, unwrap_ddg_url};
+pub use util::is_transient;
 pub use youtube::video_id;
 
 #[derive(Clone)]

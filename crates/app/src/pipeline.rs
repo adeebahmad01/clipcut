@@ -30,6 +30,10 @@ use crate::state::{AppState, Services};
 const ASSET_CONCURRENCY: usize = 4;
 /// Candidates tried per kind before falling back to the next kind.
 const FETCH_ATTEMPTS: usize = 3;
+/// Waits before fetching a candidate again after a network failure.
+const RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(3)];
+/// Time one beat may spend on retries, across every candidate and kind.
+const RETRY_BUDGET: Duration = Duration::from_secs(20);
 
 /// Start the pipeline for a project in the background.
 /// `from`: first stage to run (default: first stage not done). `only`: run just that one.
@@ -842,7 +846,13 @@ pub async fn choose_candidate(
     set_beat_status(state, id, &beat.id, BeatStatus::Searching).await?;
     let mut visual = beat.visual.clone();
     visual.kind = candidate.kind;
-    match fetch_candidate(&svc, project, &dir, beat, &visual, &candidate, &progress).await {
+    let fetched = retry_transient(
+        &mut Retries::default(),
+        || fetch_candidate(&svc, project, &dir, beat, &visual, &candidate, &progress),
+        |message| progress.beat_warn(&beat.id, message),
+    )
+    .await;
+    match fetched {
         Ok(asset) => {
             let outcome = Outcome {
                 visual,
@@ -948,6 +958,7 @@ pub async fn auto_visual(
         kinds.push(VisualKind::Text);
     }
     let mut last_error = None;
+    let mut retries = Retries::default();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
     for kind in kinds {
         let status = if kind == planned {
@@ -976,7 +987,7 @@ pub async fn auto_visual(
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let attempt = tokio::time::timeout(
             remaining.min(Duration::from_secs(60)),
-            try_kind(svc, project, dir, beat, kind, progress),
+            try_kind(svc, project, dir, beat, kind, progress, &mut retries),
         )
         .await
         .unwrap_or_else(|_| Err(anyhow::anyhow!("visual search/download budget exhausted")));
@@ -1010,6 +1021,7 @@ async fn try_kind(
     beat: &Beat,
     kind: VisualKind,
     progress: &Progress,
+    retries: &mut Retries,
 ) -> anyhow::Result<Option<Found>> {
     let mut visual = beat.visual.clone();
     visual.kind = kind;
@@ -1036,14 +1048,11 @@ async fn try_kind(
     let order = rank_candidates(svc, beat, &visual, &candidates).await;
     let mut last_error = None;
     for &index in order.iter().take(FETCH_ATTEMPTS) {
-        match fetch_candidate(
-            svc,
-            project,
-            dir,
-            beat,
-            &visual,
-            &candidates[index],
-            progress,
+        let candidate = &candidates[index];
+        match retry_transient(
+            retries,
+            || fetch_candidate(svc, project, dir, beat, &visual, candidate, progress),
+            |message| progress.beat_warn(&beat.id, message),
         )
         .await
         {
@@ -1061,6 +1070,54 @@ async fn try_kind(
         Some(e) => Err(e),
         None => Ok(None),
     }
+}
+
+/// A beat's download retries, shared by every candidate and kind it tries.
+struct Retries {
+    delays: &'static [Duration],
+    budget: Duration,
+    spent: Duration,
+}
+
+impl Default for Retries {
+    fn default() -> Self {
+        Self {
+            delays: &RETRY_DELAYS,
+            budget: RETRY_BUDGET,
+            spent: Duration::ZERO,
+        }
+    }
+}
+
+/// Runs `attempt` again after a transient failure (a timeout, a dropped
+/// connection, HTTP 429/5xx), up to twice with jittered waits, while the
+/// beat's retry budget lasts. Cancelling the project drops the wait with it.
+async fn retry_transient<T, F>(
+    retries: &mut Retries,
+    mut attempt: impl FnMut() -> F,
+    mut on_retry: impl FnMut(String),
+) -> anyhow::Result<T>
+where
+    F: Future<Output = anyhow::Result<T>>,
+{
+    let tries = retries.delays.len() + 1;
+    let mut result = attempt().await;
+    for (n, &delay) in retries.delays.iter().enumerate() {
+        // Up to a quarter either way, so parallel beats don't retry in step.
+        let jitter = uuid::Uuid::new_v4().as_u128() as u16 as f32 / f32::from(u16::MAX);
+        let delay = delay.mul_f32(0.75 + 0.5 * jitter);
+        match &result {
+            Err(e) if clipcut_sources::is_transient(e) && retries.spent + delay < retries.budget => {
+                on_retry(format!("Retrying ({}/{tries}): {e:#}", n + 2));
+            }
+            _ => break,
+        }
+        let started = tokio::time::Instant::now();
+        tokio::time::sleep(delay).await;
+        result = attempt().await;
+        retries.spent += started.elapsed();
+    }
+    result
 }
 
 /// Keep the planner's template when Imgflip knows it, else let the model pick one.
@@ -1662,5 +1719,94 @@ mod tests {
         remove_asset_file(&root, "assets/fixture.png");
         assert!(!inside.exists());
         assert!(!sidecar.exists());
+    }
+
+    fn http_error(status: u16) -> anyhow::Error {
+        clipcut_core::keys::ProviderError {
+            service: "download".into(),
+            status,
+            message: String::new(),
+        }
+        .into()
+    }
+
+    fn quick_retries(budget_ms: u64) -> Retries {
+        const DELAYS: [Duration; 2] = [Duration::from_millis(10), Duration::from_millis(30)];
+        Retries {
+            delays: &DELAYS,
+            budget: Duration::from_millis(budget_ms),
+            spent: Duration::ZERO,
+        }
+    }
+
+    /// Fails with each of `errors` in turn, then succeeds.
+    async fn retry_through(
+        retries: &mut Retries,
+        errors: Vec<anyhow::Error>,
+    ) -> (anyhow::Result<&'static str>, usize, Vec<String>) {
+        let mut errors = errors.into_iter();
+        let mut attempts = 0;
+        let mut messages = Vec::new();
+        let result = retry_transient(
+            retries,
+            || {
+                attempts += 1;
+                let next = errors.next();
+                async move { next.map_or(Ok("asset"), Err) }
+            },
+            |message| messages.push(message),
+        )
+        .await;
+        (result, attempts, messages)
+    }
+
+    #[tokio::test]
+    async fn transient_download_failures_retry_the_same_candidate() {
+        let mut retries = quick_retries(1000);
+        let (result, attempts, messages) =
+            retry_through(&mut retries, vec![http_error(503), http_error(429)]).await;
+        assert_eq!(result.unwrap(), "asset");
+        assert_eq!(attempts, 3);
+        assert!(messages[0].starts_with("Retrying (2/3): "), "{messages:?}");
+        assert!(messages[1].starts_with("Retrying (3/3): "), "{messages:?}");
+        assert!(retries.spent >= Duration::from_millis(30));
+
+        let (result, attempts, _) = retry_through(
+            &mut quick_retries(1000),
+            vec![http_error(502), http_error(502), http_error(502)],
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(attempts, 3);
+    }
+
+    #[tokio::test]
+    async fn final_failures_and_a_spent_budget_do_not_retry() {
+        let (result, attempts, messages) =
+            retry_through(&mut quick_retries(1000), vec![http_error(404)]).await;
+        assert!(result.is_err());
+        assert_eq!((attempts, messages.len()), (1, 0));
+        let (_, attempts, _) = retry_through(
+            &mut quick_retries(1000),
+            vec![anyhow::anyhow!("image is only 8x8")],
+        )
+        .await;
+        assert_eq!(attempts, 1);
+
+        // The first wait is at least 7.5 ms, so a 5 ms budget allows none.
+        let (result, attempts, _) =
+            retry_through(&mut quick_retries(5), vec![http_error(503)]).await;
+        assert!(result.is_err());
+        assert_eq!(attempts, 1);
+        // One retry fits in 30 ms; the second wait (22.5 ms or more) doesn't.
+        let mut retries = quick_retries(30);
+        let (_, attempts, _) =
+            retry_through(&mut retries, vec![http_error(503), http_error(503)]).await;
+        assert_eq!(attempts, 2);
+        // Time spent retrying earlier candidates of the beat counts too.
+        let mut retries = quick_retries(1000);
+        retries.spent = Duration::from_millis(995);
+        let (_, attempts, _) = retry_through(&mut retries, vec![http_error(503)]).await;
+        assert_eq!(attempts, 1);
     }
 }
