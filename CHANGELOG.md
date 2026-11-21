@@ -6,6 +6,15 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- A beat whose download times out, drops its connection or gets HTTP 429
+  or a 5xx error now fetches the same visual again, after about 1 second
+  and then 3, before ClipCut tries another result or kind of visual. The
+  beat shows "Retrying (2/3)", a beat spends at most 20 seconds on retries,
+  and final errors such as a 404 still move on at once. Choosing a search
+  result for a beat retries the same way.
+
 ### Added
 
 - `clipcut doctor --report` and Settings → Setup write a bug report file

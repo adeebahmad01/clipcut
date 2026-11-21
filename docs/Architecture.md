@@ -41,7 +41,11 @@ project after each one, so any stage can be re-run from the UI or with
    yt-dlp to find the moment where the words are spoken and cut only those
    seconds. Article beats load the page in headless Chromium over CDP,
    highlight the matching sentence and screenshot it. Every asset gets a
-   `.source.json` recording where it came from.
+   `.source.json` recording where it came from. A download that fails on
+   the network (`sources::is_transient`: timeouts, dropped connections,
+   HTTP 429/5xx, yt-dlp's network errors) is fetched again after about 1 s
+   and then 3 s, within 20 s of retries per beat, before the next candidate
+   and then the next kind is tried.
 6. **Voice.** `tts` normalizes the text, turns it into phonemes with
    espeak-ng, runs Kokoro and aligns each word to its time in the audio.
 7. **Render.** `render::director` turns beats, assets and word timings

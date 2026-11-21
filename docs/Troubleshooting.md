@@ -73,6 +73,15 @@ machine and set `youtube.cookies_from_browser = "firefox"` (or `chrome`,
 **Downloads that used to work start failing.**
 YouTube changes often. Update yt-dlp with `clipcut setup yt-dlp`.
 
+**A beat says "Retrying (2/3)".**
+The download hit a network problem: a timeout, a dropped connection, or
+HTTP 429 or a 5xx error. ClipCut fetches the same video, GIF or image again
+after about 1 second, then about 3, before it tries the next result and
+then another kind of visual. A beat spends at most 20 seconds on retries,
+and errors that won't go away on their own, such as a 404, aren't retried.
+If most beats retry, check your connection, or wait a while if YouTube is
+rate-limiting you.
+
 ## Voice
 
 **"kokoro: model file not found".**

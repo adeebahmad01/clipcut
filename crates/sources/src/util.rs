@@ -237,6 +237,46 @@ pub(crate) async fn bounded<T>(
         .map_err(|_| anyhow::anyhow!("{name} exceeded its {}s budget", timeout.as_secs()))?
 }
 
+/// Worth fetching the same thing again: a timeout, a dropped connection,
+/// HTTP 408/425/429/5xx, or yt-dlp reporting one of those. A 404, a size
+/// limit or a file that isn't usable media is final.
+pub fn is_transient(e: &anyhow::Error) -> bool {
+    use std::io::ErrorKind;
+    e.chain().any(|cause| {
+        if let Some(p) = cause.downcast_ref::<clipcut_core::keys::ProviderError>() {
+            return transient_status(p.status);
+        }
+        if let Some(r) = cause.downcast_ref::<reqwest::Error>() {
+            if let Some(status) = r.status() { return transient_status(status.as_u16()); }
+            if r.is_timeout() || r.is_connect() || r.is_request() || r.is_body() { return true; }
+        }
+        if let Some(io) = cause.downcast_ref::<std::io::Error>()
+            && matches!(io.kind(), ErrorKind::TimedOut | ErrorKind::ConnectionReset
+                | ErrorKind::ConnectionAborted | ErrorKind::BrokenPipe)
+        {
+            return true;
+        }
+        transient_message(&cause.to_string())
+    })
+}
+
+fn transient_status(status: u16) -> bool {
+    matches!(status, 408 | 425 | 429 | 500..=599)
+}
+
+/// yt-dlp and timeouts only leave text ("HTTP Error 503", "Read timed out").
+fn transient_message(message: &str) -> bool {
+    const NETWORK: &[&str] = &[
+        "timed out", "connection reset", "connection aborted", "broken pipe", "remote end closed",
+        "remotedisconnected", "incompleteread", "temporary failure in name resolution",
+    ];
+    let m = message.to_ascii_lowercase();
+    NETWORK.iter().any(|n| m.contains(n))
+        || m.match_indices("http error ").any(|(i, p)| {
+            m[i + p.len()..].get(..3).and_then(|code| code.parse().ok()).is_some_and(transient_status)
+        })
+}
+
 /// `dest_dir/<stem>.<ext>` relative to the project dir (`dest_dir`'s parent).
 pub fn relative_to_project(dest_dir: &Path, file: &Path) -> String {
     let base = dest_dir.parent().unwrap_or(dest_dir);
@@ -352,6 +392,92 @@ mod tests {
         assert!(!http_url("file:///etc/passwd"));
         assert!(!http_url("https://secret@example.com/"));
         assert!(http_url("https://example.com/image.png"));
+    }
+
+    #[test]
+    fn transient_failures_are_told_apart_from_final_ones() {
+        use clipcut_core::keys::ProviderError;
+        let status = |status| anyhow::Error::from(ProviderError { service: "download".into(), status, message: String::new() });
+        for code in [408, 429, 500, 502, 503] {
+            assert!(is_transient(&status(code)), "{code}");
+        }
+        for code in [400, 401, 403, 404, 410] {
+            assert!(!is_transient(&status(code)), "{code}");
+        }
+        assert!(is_transient(&status(503).context("Downloading GIPHY")));
+        let reset = std::io::Error::from(std::io::ErrorKind::ConnectionReset);
+        assert!(is_transient(&anyhow::Error::from(reset).context("reading body")));
+        assert!(!is_transient(&std::io::Error::from(std::io::ErrorKind::NotFound).into()));
+        for line in [
+            "yt-dlp exited with exit status: 1: ERROR: unable to download video data: HTTP Error 503: Service Unavailable",
+            "ERROR: [youtube] abc: Unable to download API page: HTTP Error 429: Too Many Requests",
+            "ERROR: [download] Got error: HTTPSConnectionPool(host='rr1.googlevideo.com', port=443): Read timed out.",
+            "ERROR: [youtube] abc: Unable to download webpage: <urlopen error [Errno 104] Connection reset by peer>",
+            "ERROR: [youtube] abc: Unable to download webpage: <urlopen error [Errno -3] Temporary failure in name resolution>",
+            "ERROR: Got error: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))",
+            "/home/me/.local/share/clipcut/bin/yt-dlp timed out after 90s",
+        ] {
+            assert!(is_transient(&anyhow::anyhow!("{line}")), "{line}");
+        }
+        for line in [
+            "yt-dlp exited with exit status: 1: ERROR: unable to download video data: HTTP Error 404: Not Found",
+            "ERROR: unable to download video data: HTTP Error 403: Forbidden",
+            "ERROR: [youtube] abc: Video unavailable. This video has been removed by the uploader",
+            "ERROR: [youtube] abc: Sign in to confirm you're not a bot",
+            "yt-dlp produced no file: ",
+            "https://example.com/a.mp4 is 90000000 bytes (limit 40000000)",
+            "image is only 8x8",
+            "HTTP error 50",
+        ] {
+            assert!(!is_transient(&anyhow::anyhow!("{line}")), "{line}");
+        }
+    }
+
+    /// Answers on all interfaces, reached via the Network URL. The first
+    /// connection is dropped once its request arrives; later ones get `response`.
+    async fn drop_first_then(response: &'static [u8]) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+        socket.connect("192.0.2.1:80").unwrap();
+        let ip = socket.local_addr().unwrap().ip();
+        let url = format!("http://{ip}:{}/clip.gif", listener.local_addr().unwrap().port());
+        let task = tokio::spawn(async move {
+            for first in std::iter::once(true).chain(std::iter::repeat(false)) {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 1024];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut buffer).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => request.extend_from_slice(&buffer[..n]),
+                    }
+                }
+                if !first {
+                    let _ = stream.write_all(response).await;
+                }
+            }
+        });
+        (url, task)
+    }
+
+    #[tokio::test]
+    async fn a_dropped_connection_is_transient_and_the_next_try_downloads() {
+        let (url, task) = drop_first_then(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nGIF8").await;
+        let http = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(5)).build().unwrap();
+        let dest = std::env::temp_dir().join(format!("clipcut-retry-{}.gif", uuid::Uuid::new_v4().simple()));
+        let first = download_to(&http, &url, &dest, 1024, Duration::from_secs(5), None).await.unwrap_err();
+        assert!(is_transient(&first), "{first:#}");
+        assert!(!dest.exists());
+        assert_eq!(download_to(&http, &url, &dest, 1024, Duration::from_secs(5), None).await.unwrap(), 4);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"GIF8");
+        let _ = std::fs::remove_file(&dest);
+        task.abort();
+
+        let (url, task) = drop_first_then(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+        let _ = download_to(&http, &url, &dest, 1024, Duration::from_secs(5), None).await;
+        let missing = download_to(&http, &url, &dest, 1024, Duration::from_secs(5), None).await.unwrap_err();
+        assert!(!is_transient(&missing), "{missing:#}");
+        task.abort();
     }
 
     #[tokio::test]
