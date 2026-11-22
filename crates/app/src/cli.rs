@@ -2895,6 +2895,8 @@ pub const CONFIG_KEYS: OneOf<String> = OneOf::hint(&[
     "publish.privacy",
     "publish.category_id",
     "publish.made_for_kids",
+    "cache",
+    "cache.max_gb",
     "tools",
     "tools.ffmpeg",
     "tools.ffprobe",
@@ -5094,7 +5096,7 @@ mod tests {
 
         let err = |key: &str| config_get(&config, key).unwrap_err().to_string();
         assert!(
-            err("vidoe.fps").contains("the sections are audio, llm"),
+            err("vidoe.fps").contains("the sections are audio, cache, llm"),
             "{}",
             err("vidoe.fps")
         );

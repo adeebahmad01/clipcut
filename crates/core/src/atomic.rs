@@ -5,7 +5,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-pub(crate) struct TemporaryFile {
+pub struct TemporaryFile {
     path: PathBuf,
     committed: bool,
 }
@@ -13,7 +13,7 @@ pub(crate) struct TemporaryFile {
 impl TemporaryFile {
     /// Create synchronously so cancellation cannot strand an in-flight async
     /// file creation before its cleanup guard exists.
-    pub(crate) fn create(dest: &Path, private: bool) -> std::io::Result<(Self, File)> {
+    pub fn create(dest: &Path, private: bool) -> std::io::Result<(Self, File)> {
         let parent = dest.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
         std::fs::create_dir_all(parent)?;
         for _ in 0..8 {
@@ -44,7 +44,7 @@ impl TemporaryFile {
         Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "could not create a unique temporary file"))
     }
 
-    pub(crate) fn commit(mut self, dest: &Path) -> std::io::Result<()> {
+    pub fn commit(mut self, dest: &Path) -> std::io::Result<()> {
         std::fs::rename(&self.path, dest)?;
         self.committed = true;
         Ok(())
@@ -59,12 +59,23 @@ impl Drop for TemporaryFile {
     }
 }
 
-pub(crate) fn write(path: &Path, bytes: &[u8], private: bool) -> anyhow::Result<()> {
+pub fn write(path: &Path, bytes: &[u8], private: bool) -> anyhow::Result<()> {
     let (temp, mut file) = TemporaryFile::create(path, private)?;
     file.write_all(bytes)?;
     file.sync_all()?;
     drop(file);
     temp.commit(path)?;
+    Ok(())
+}
+
+/// Atomically copy `src` to `dest` using a temporary file in `dest`'s parent directory.
+pub fn copy_atomic(src: &Path, dest: &Path) -> std::io::Result<()> {
+    let (temp, mut file) = TemporaryFile::create(dest, false)?;
+    let mut reader = File::open(src)?;
+    std::io::copy(&mut reader, &mut file)?;
+    file.sync_all()?;
+    drop(file);
+    temp.commit(dest)?;
     Ok(())
 }
 

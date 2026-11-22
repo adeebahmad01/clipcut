@@ -17,6 +17,13 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Shared asset cache for downloaded visuals: visual assets (YouTube cuts, GIFs,
+  stock clips and images) are cached in `<home>/cache/assets/` keyed by provider
+  and source URL (and segment timestamps for YouTube). When beats are re-run,
+  projects are duplicated, or the same media is used again, ClipCut links from
+  the cache instead of downloading again. The cache respects `cache.max_gb`
+  (default 5 GB) in `config.toml` and evicts least recently used items after
+  each Visuals stage.
 - `clipcut doctor --report` and Settings → Setup write a bug report file
   (`clipcut-report-<date>.txt`) containing system info, doctor checks, tool
   versions, masked configuration, key states without key text, the last

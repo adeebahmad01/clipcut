@@ -56,6 +56,10 @@ impl Paths {
     pub fn cache(&self) -> PathBuf {
         self.home.join("cache")
     }
+    /// Shared download cache for visuals (YouTube cuts, GIFs, stock, images).
+    pub fn asset_cache(&self) -> PathBuf {
+        self.cache().join("assets")
+    }
     /// Self-managed binaries such as the standalone `yt-dlp`.
     pub fn bin(&self) -> PathBuf {
         self.home.join("bin")

@@ -214,6 +214,39 @@ impl Sources {
         let ffmpeg = Tools::require(&self.tools.ffmpeg, "ffmpeg")?;
         Tools::require(&self.tools.ffprobe, "ffprobe")?;
         let url = format!("https://www.youtube.com/watch?v={id}");
+        let cache = crate::cache::AssetCache::new(&self.paths.cache(), self.config.cache.max_gb);
+        let key = crate::cache::asset_key("youtube", &url, Some((a, b)));
+
+        tokio::fs::create_dir_all(dest_dir).await?;
+        clear_stem(dest_dir, stem);
+
+        if let Some((final_path, sidecar)) = cache.get(&key, dest_dir, stem) {
+            let (width, height, duration_s) = match (sidecar.width, sidecar.height, sidecar.duration_s) {
+                (Some(w), Some(h), Some(d)) => (w, h, d),
+                _ => {
+                    let probe = self.validate_video(&final_path).await?;
+                    (probe.width, probe.height, probe.duration_s)
+                }
+            };
+            let asset = Asset {
+                kind: AssetKind::Video,
+                path: relative_to_project(dest_dir, &final_path),
+                provider: "youtube".into(),
+                source_url: format!("{url}&t={}s", a.floor() as u32),
+                credit: credit_for(c),
+                width,
+                height,
+                duration_s: Some(duration_s),
+                trim_start_s: 0.0,
+                focus: None,
+            };
+            crate::provenance::record(c, &asset, &final_path, None, serde_json::json!({
+                "mode": "youtube_exact_section", "start_s": a, "end_s": b,
+                "padding_s": 0, "duration_tolerance_s": 0.045, "cached": true,
+            }))?;
+            return Ok(asset);
+        }
+
         let path = self.download_section(&id, (a, b), dest_dir, stem, 40, Duration::from_secs(120)).await?;
         let downloaded = self.validate_video(&path).await?;
         let duration = b - a;
@@ -247,6 +280,7 @@ impl Sources {
             "mode": "youtube_exact_section", "start_s": a, "end_s": b,
             "padding_s": 0, "duration_tolerance_s": 0.045,
         }))?;
+        let _ = cache.put(&key, &final_path, "youtube", &url, Some(probe.width), Some(probe.height), Some(probe.duration_s), Some(AssetKind::Video));
         Ok(asset)
     }
 
@@ -342,6 +376,51 @@ impl Sources {
         let ffmpeg = Tools::require(&self.tools.ffmpeg, "ffmpeg")?;
         Tools::require(&self.tools.ffprobe, "ffprobe")?;
         let url = format!("https://www.youtube.com/watch?v={id}");
+        let cache = crate::cache::AssetCache::new(&self.paths.cache(), self.config.cache.max_gb);
+        let key = crate::cache::asset_key("youtube-clip", &url, Some((a, b)));
+
+        tokio::fs::create_dir_all(dest_dir).await?;
+        clear_stem(dest_dir, stem);
+
+        if let Some((final_path, sidecar)) = cache.get(&key, dest_dir, stem) {
+            let (width, height, duration_s) = match (sidecar.width, sidecar.height, sidecar.duration_s) {
+                (Some(w), Some(h), Some(d)) => (w, h, d),
+                _ => {
+                    let probe = self.validate_video_within(&final_path, MAX_SEGMENT_SECONDS).await?;
+                    (probe.width, probe.height, probe.duration_s)
+                }
+            };
+            let c = Candidate {
+                kind: VisualKind::Youtube,
+                provider: "youtube".into(),
+                title: clean_text(&info.title, 300),
+                page_url: url.clone(),
+                media_url: None,
+                thumbnail_url: None,
+                duration_s: Some(info.duration_s),
+                width: None,
+                height: None,
+                start_s: Some(a),
+                extra: json!({"id": id, "channel": clean_text(&info.channel, 300), "license_status": "unknown_requires_review"}),
+            };
+            let asset = Asset {
+                kind: AssetKind::Video,
+                path: relative_to_project(dest_dir, &final_path),
+                provider: "youtube".into(),
+                source_url: format!("{url}&t={}s", a.floor() as u32),
+                credit: credit_for(&c),
+                width,
+                height,
+                duration_s: Some(duration_s),
+                trim_start_s: 0.0,
+                focus: None,
+            };
+            crate::provenance::record(&c, &asset, &final_path, None, json!({
+                "mode": "youtube_clip_section", "start_s": a, "end_s": b, "duration_tolerance_s": 0.1, "cached": true,
+            }))?;
+            return Ok(asset);
+        }
+
         let path = self.download_section(&id, (a, b), dest_dir, stem, 300, Duration::from_secs(600)).await?;
         let length = b - a;
         let downloaded = self.validate_video_within(&path, MAX_SEGMENT_SECONDS).await?;
@@ -388,6 +467,7 @@ impl Sources {
         crate::provenance::record(&c, &asset, &final_path, None, json!({
             "mode": "youtube_clip_section", "start_s": a, "end_s": b, "duration_tolerance_s": 0.1,
         }))?;
+        let _ = cache.put(&key, &final_path, "youtube-clip", &url, Some(probe.width), Some(probe.height), Some(probe.duration_s), Some(AssetKind::Video));
         Ok(asset)
     }
 }
