@@ -78,6 +78,9 @@ privacy = "private"
 category_id = "22"
 made_for_kids = false
 
+[cache]
+max_gb = 5
+
 [tools]
 # ffmpeg = "/opt/ffmpeg/bin/ffmpeg"
 ```
@@ -185,6 +188,14 @@ them in **Settings → Preferences → YouTube uploads**.
 | `privacy` | `"private"` | Privacy preselected in the app, and used by `clipcut publish` without `--privacy` and by API requests that leave `privacy` out: `public`, `unlisted` or `private` |
 | `category_id` | `"22"` | YouTube category of every upload, as its numeric id: `22` People & Blogs, `24` Entertainment, `27` Education, `28` Science & Technology. The app lists them all |
 | `made_for_kids` | `false` | Declare uploads as made for kids. YouTube then turns off comments and personalized ads on them |
+
+## cache
+
+Settings for the shared visual asset cache (`<home>/cache/assets/`).
+
+| Key | Default | Meaning |
+|---|---|---|
+| `max_gb` | `5` | Maximum size in gigabytes of the shared asset cache before least recently used files are evicted after each Visuals stage (1–1000) |
 
 ## tools
 

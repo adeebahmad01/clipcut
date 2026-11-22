@@ -18,9 +18,23 @@ pub struct Config {
     pub tts: TtsConfig,
     pub audio: AudioConfig,
     pub publish: PublishConfig,
+    pub cache: CacheConfig,
     /// Executable overrides by tool name: ffmpeg, ffprobe, yt-dlp, chromium,
     /// claude, codex, espeak-ng, podman.
     pub tools: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CacheConfig {
+    /// Maximum gigabytes for the shared asset cache before LRU eviction.
+    pub max_gb: u32,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self { max_gb: 5 }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -299,6 +313,7 @@ impl Config {
             (1..=3).contains(&category.len()) && category.bytes().all(|b| b.is_ascii_digit()),
             "publish.category_id must be a numeric YouTube category id such as 22"
         );
+        anyhow::ensure!((1..=1000).contains(&self.cache.max_gb), "cache.max_gb must be between 1 and 1000");
 
         let endpoint = &self.search.searxng_url;
         anyhow::ensure!(
@@ -405,6 +420,8 @@ mod tests {
             ("video.crf", |c| c.video.crf = 52),
             ("llm.timeout_seconds", |c| c.llm.timeout_seconds = 29),
             ("llm.timeout_seconds", |c| c.llm.timeout_seconds = 1801),
+            ("cache.max_gb", |c| c.cache.max_gb = 0),
+            ("cache.max_gb", |c| c.cache.max_gb = 1001),
         ];
         for (field, change) in cases {
             let mut config = Config::default();

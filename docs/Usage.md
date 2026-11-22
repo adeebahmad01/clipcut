@@ -778,7 +778,9 @@ the video's title. You can delete a project from the app, with
 keep the project, `clipcut clean --renders` (or Settings → Storage)
 removes old `render/` folders; `clipcut render <id>` makes them again.
 
-Next to `projects/`, `queue.json` holds the [queue](#the-queue) and
+Next to `projects/`, `cache/assets/` holds the shared cache of downloaded
+visuals (YouTube cuts, GIFs, stock clips and images) reused across projects and
+re-runs via hard links. `queue.json` holds the [queue](#the-queue) and
 `youtube-oauth.json` the [YouTube](#publish-to-youtube) client and
 sign-in.
 

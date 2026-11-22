@@ -1,7 +1,7 @@
 //! Shared contracts for every ClipCut crate: the project model, the render
 //! timeline, configuration, rotating API keys, paths, progress and tool lookup.
 
-mod atomic;
+pub mod atomic;
 pub mod config;
 pub mod http;
 pub mod keys;

@@ -669,6 +669,9 @@ async fn assets_stage(
     if fallbacks > 0 {
         progress.info(format!("{fallbacks} beat(s) used a fallback visual"));
     }
+    let cache_dir = state.paths.cache().join("assets");
+    let max_bytes = (state.config().cache.max_gb as u64) * 1024 * 1024 * 1024;
+    let _ = clipcut_sources::cache::evict_lru(&cache_dir, max_bytes);
     Ok(())
 }
 

@@ -194,12 +194,67 @@ impl Sources {
 
     pub(crate) async fn fetch_image(&self, c: &Candidate, dest_dir: &Path, stem: &str) -> anyhow::Result<Asset> {
         let url = c.media_url.as_deref().unwrap_or(&c.page_url);
+        let cache = crate::cache::AssetCache::new(&self.paths.cache(), self.config.cache.max_gb);
+        let key = crate::cache::asset_key(&c.provider, url, None);
+
+        tokio::fs::create_dir_all(dest_dir).await?;
+        clear_stem(dest_dir, stem);
+
+        if let Some((path, sidecar)) = cache.get(&key, dest_dir, stem) {
+            let kind = sidecar.asset_kind.unwrap_or(AssetKind::Image);
+            let w = sidecar.width.unwrap_or(0);
+            let h = sidecar.height.unwrap_or(0);
+            let asset = Asset {
+                kind,
+                path: relative_to_project(dest_dir, &path),
+                provider: c.provider.clone(),
+                source_url: c.page_url.clone(),
+                credit: credit_for(c),
+                width: w,
+                height: h,
+                duration_s: None,
+                trim_start_s: 0.0,
+                focus: None,
+            };
+            crate::provenance::record(c, &asset, &path, Some(url), json!({
+                "mode": if kind == AssetKind::Svg { "static_svg" } else { "decoded_image" },
+                "cached": true,
+            }))?;
+            return Ok(asset);
+        }
+
         let referer = (c.page_url != url).then_some(c.page_url.as_str());
         let ((path, w, h, kind), actual_url) = match self.fetch_image_file(url, dest_dir, stem, referer).await {
             Ok(r) => (r, url),
             // Hotlink-protected originals: fall back to the search thumbnail.
             Err(e) => match c.thumbnail_url.as_deref().filter(|t| *t != url) {
-                Some(thumb) => (self.fetch_image_file(thumb, dest_dir, stem, referer).await.map_err(|_| e)?, thumb),
+                Some(thumb) => {
+                    let thumb_key = crate::cache::asset_key(&c.provider, thumb, None);
+                    if let Some((p, sidecar)) = cache.get(&thumb_key, dest_dir, stem) {
+                        let kind = sidecar.asset_kind.unwrap_or(AssetKind::Image);
+                        let w = sidecar.width.unwrap_or(0);
+                        let h = sidecar.height.unwrap_or(0);
+                        let asset = Asset {
+                            kind,
+                            path: relative_to_project(dest_dir, &p),
+                            provider: c.provider.clone(),
+                            source_url: c.page_url.clone(),
+                            credit: credit_for(c),
+                            width: w,
+                            height: h,
+                            duration_s: None,
+                            trim_start_s: 0.0,
+                            focus: None,
+                        };
+                        crate::provenance::record(c, &asset, &p, Some(thumb), json!({
+                            "mode": if kind == AssetKind::Svg { "static_svg" } else { "decoded_image" },
+                            "thumbnail_fallback": true,
+                            "cached": true,
+                        }))?;
+                        return Ok(asset);
+                    }
+                    (self.fetch_image_file(thumb, dest_dir, stem, referer).await.map_err(|_| e)?, thumb)
+                }
                 None => return Err(e),
             },
         };
@@ -219,13 +274,41 @@ impl Sources {
             "mode": if kind == AssetKind::Svg { "static_svg" } else { "decoded_image" },
             "thumbnail_fallback": actual_url != url,
         }))?;
+        let _ = cache.put(&crate::cache::asset_key(&c.provider, actual_url, None), &path, &c.provider, actual_url, Some(w), Some(h), None, Some(kind));
         Ok(asset)
     }
 
     pub(crate) async fn fetch_video_file(&self, c: &Candidate, dest_dir: &Path, stem: &str, max: u64) -> anyhow::Result<Asset> {
         let url = c.media_url.as_deref().ok_or_else(|| anyhow::anyhow!("{} candidate has no media URL", c.provider))?;
+        let cache = crate::cache::AssetCache::new(&self.paths.cache(), self.config.cache.max_gb);
+        let key = crate::cache::asset_key(&c.provider, url, None);
+
         tokio::fs::create_dir_all(dest_dir).await?;
         clear_stem(dest_dir, stem);
+
+        if let Some((path, sidecar)) = cache.get(&key, dest_dir, stem) {
+            let probe = match (sidecar.width, sidecar.height, sidecar.duration_s) {
+                (Some(w), Some(h), Some(d)) => crate::media::Probe { width: w, height: h, duration_s: d, fps: 30.0, has_video: true, has_audio: false },
+                _ => self.validate_video(&path).await?,
+            };
+            let asset = Asset {
+                kind: AssetKind::Video,
+                path: relative_to_project(dest_dir, &path),
+                provider: c.provider.clone(),
+                source_url: c.page_url.clone(),
+                credit: credit_for(c),
+                width: probe.width,
+                height: probe.height,
+                duration_s: Some(probe.duration_s),
+                trim_start_s: 0.0,
+                focus: None,
+            };
+            crate::provenance::record(c, &asset, &path, Some(url), json!({
+                "mode": "bounded_video_download", "normalized": "h264/yuv420p/mp4", "cached": true,
+            }))?;
+            return Ok(asset);
+        }
+
         let ext = url
             .split(['?', '#'])
             .next()
@@ -253,6 +336,7 @@ impl Sources {
         crate::provenance::record(c, &asset, &path, Some(url), json!({
             "mode": "bounded_video_download", "normalized": "h264/yuv420p/mp4",
         }))?;
+        let _ = cache.put(&key, &path, &c.provider, url, Some(probe.width), Some(probe.height), Some(probe.duration_s), Some(AssetKind::Video));
         Ok(asset)
     }
 
@@ -388,5 +472,50 @@ mod tests {
         }
         p.duration_s = 201.0;
         assert!(validate_video_probe(&p, MAX_SEGMENT_SECONDS).is_err());
+    }
+
+    #[tokio::test]
+    async fn fetch_image_uses_cached_file_without_network() {
+        let dir = std::env::temp_dir().join(format!("clipcut-fetch-cache-test-{}", uuid::Uuid::new_v4().simple()));
+        let cache_dir = dir.join("cache");
+        let dest_dir = dir.join("dest");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        let cache = crate::cache::AssetCache::new(&cache_dir, 5);
+
+        let url = "https://example.com/already-cached.png";
+        let key = crate::cache::asset_key("test_provider", url, None);
+
+        let fake_file = dir.join("temp.png");
+        std::fs::write(&fake_file, b"sample image bytes").unwrap();
+        cache.put(&key, &fake_file, "test_provider", url, Some(300), Some(200), None, Some(AssetKind::Image)).unwrap();
+
+        let config = clipcut_core::Config::default();
+        let paths = clipcut_core::Paths { home: dir.clone() };
+        let keys = clipcut_core::KeyPool::load(paths.keys_file()).unwrap();
+        let tools = clipcut_core::Tools::detect(&config, &paths);
+        let sources = crate::Sources::new(config, keys, paths, tools);
+
+        let candidate = Candidate {
+            kind: clipcut_core::VisualKind::Image,
+            provider: "test_provider".into(),
+            title: "Test".into(),
+            page_url: url.into(),
+            media_url: Some(url.into()),
+            thumbnail_url: None,
+            duration_s: None,
+            width: Some(300),
+            height: Some(200),
+            start_s: None,
+            extra: serde_json::json!({}),
+        };
+
+        let asset = sources.fetch_image(&candidate, &dest_dir, "b01").await.unwrap();
+        assert_eq!(asset.width, 300);
+        assert_eq!(asset.height, 200);
+        assert_eq!(asset.provider, "test_provider");
+        assert!(dest_dir.join("b01.png").exists());
+        assert_eq!(std::fs::read(dest_dir.join("b01.png")).unwrap(), b"sample image bytes");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

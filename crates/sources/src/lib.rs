@@ -17,6 +17,7 @@ mod captions;
 mod health;
 mod icons;
 mod ideas;
+pub mod cache;
 mod media;
 mod providers;
 mod provenance;
@@ -27,6 +28,7 @@ mod util;
 mod youtube;
 
 pub use article::shutdown_browser;
+pub use cache::{AssetCache, AssetSidecar, asset_key};
 pub use captions::{best_moment, parse_vtt};
 pub use ideas::{Idea, IdeaSource, parse_trends_rss};
 pub use providers::rank_memes;
