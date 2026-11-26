@@ -40,7 +40,7 @@ Make runs survive limits and restarts, lock down the LAN app, and make ClipCut e
 
 - [ ] **CC-001 Access token for the web UI**: Requests from other devices need a secret token that the printed Network URL carries, so nobody else on the Wi-Fi can use the app or spend your keys. ([prompt](ROADMAP-PROMPTS.md#cc-001-access-token-for-the-web-ui))
 - [ ] **CC-002 QR code for the Network URL**: The terminal and Settings show a QR code of the Network URL so you can open the app on your phone without typing it. ([prompt](ROADMAP-PROMPTS.md#cc-002-qr-code-for-the-network-url))
-- [ ] **CC-003 Wait out Claude usage limits**: When Claude Code hits a usage limit, the queue pauses until it resets and then carries on, instead of failing every video left. ([prompt](ROADMAP-PROMPTS.md#cc-003-wait-out-claude-usage-limits))
+- [x] **CC-003 Wait out Claude usage limits**: When Claude Code hits a usage limit, the queue pauses until it resets and then carries on, instead of failing every video left. ([prompt](ROADMAP-PROMPTS.md#cc-003-wait-out-claude-usage-limits))
 - [x] **CC-004 Retry flaky beat downloads**: A beat whose download times out or drops is retried with backoff before ClipCut falls back to another kind of visual. ([prompt](ROADMAP-PROMPTS.md#cc-004-retry-flaky-beat-downloads))
 - [ ] **CC-005 Resume uploads after a restart**: A YouTube upload cut off by closing ClipCut picks up where it stopped on the next start. ([prompt](ROADMAP-PROMPTS.md#cc-005-resume-uploads-after-a-restart))
 - [x] **CC-006 Shared asset cache**: The same YouTube moment, GIF or image used again, in another project or on a re-run, comes from a local cache instead of a new download. ([prompt](ROADMAP-PROMPTS.md#cc-006-shared-asset-cache))

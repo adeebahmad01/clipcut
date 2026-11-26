@@ -216,7 +216,9 @@ in [Publishing](#publishing). With `publish_every_minutes` (≤ 43200), item N i
 that interval after the first. Asking to publish while YouTube isn't
 connected is a 400.
 
-`QueueState`: `{ items: [QueueItem], paused }`.
+`QueueState`: `{ items: [QueueItem], paused, pause_reason?, resume_at?, backoff_minutes? }`.
+`pause_reason` (string) and `resume_at` (ISO 8601 string) are present when the
+queue is automatically paused waiting out an LLM usage or rate limit.
 `QueueItem`: `{ id, topic, notes, ...options, project_id, status, error, added_at, started_at, finished_at, video_url }`,
 with `status` one of `waiting`, `running`, `done`, `failed`, `cancelled`.
 `video_url` is the YouTube link once published.

@@ -2743,7 +2743,17 @@ pub async fn queue(
             .iter()
             .any(|i| i.status == ItemStatus::Waiting);
         if snapshot.paused {
-            println!("\nPaused: no new video starts until `clipcut queue resume`.");
+            if let (Some(resume_at), Some(reason)) = (&snapshot.resume_at, &snapshot.pause_reason) {
+                let time = resume_at.with_timezone(&chrono::Local).format("%H:%M");
+                println!("\nPaused until {time}: {reason}");
+            } else if let Some(resume_at) = &snapshot.resume_at {
+                let time = resume_at.with_timezone(&chrono::Local).format("%H:%M");
+                println!("\nPaused until {time}");
+            } else if let Some(reason) = &snapshot.pause_reason {
+                println!("\nPaused: {reason}");
+            } else {
+                println!("\nPaused: no new video starts until `clipcut queue resume`.");
+            }
         } else if waiting && app.is_none() {
             println!("\nClipCut isn't running; waiting videos start when you run `clipcut`.");
         }

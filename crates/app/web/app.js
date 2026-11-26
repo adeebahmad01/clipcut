@@ -1770,12 +1770,16 @@ function ProjectView(id, initialTab) {
     const beatBusy = beatsBusy(id);
     const stale = !!p.render && !renderReady(p);
     const blocked = !!action || beatBusy || !!dirty;
-    patch(note, JSON.stringify([st.kind, st.stage, needHook, ui.tab, dirty, beatBusy, stale]), () => {
+    patch(note, JSON.stringify([st.kind, st.stage, st.error, needHook, ui.tab, dirty, beatBusy, stale]), () => {
       if (dirty) return h('div', { class: 'callout' }, icon('edit'),
         h('div', null, h('strong', null, 'Unsaved edits'), h('p', null, 'Save or revert your changes before continuing or re-running.')),
         h('button', { class: 'btn sm', onclick: () => { if (dirty === 'details') ui.details = true; else setTab(dirty); update(); } }, 'Review edits'));
       if (beatBusy) return h('div', { class: 'callout' }, spinner(), h('p', null, 'Finish the visual change before continuing.'));
       if (st.kind === 'done' && stale) return h('div', { class: 'callout' }, icon('info'), h('p', null, 'Re-render to include your visual changes. The previous download is no longer current.'));
+      if (st.kind === 'failed' && (st.error?.toLowerCase().includes('limit') || st.error?.toLowerCase().includes('try again at'))) {
+        return h('div', { class: 'callout' }, icon('clock'),
+          h('div', null, h('strong', null, 'Claude usage limit'), h('p', null, st.error)));
+      }
       if (st.kind !== 'paused') return null;
       const hint = { hooks: needHook ? 'Choose the hook you like best, then continue.' : 'Hook chosen. Continue to write the script.',
         script: 'Edit the narration if you like, then continue to plan the beats.',
@@ -2625,10 +2629,21 @@ function QueueView() {
       const running = items.find((i) => i.status === 'running');
       const waiting = items.filter((i) => i.status === 'waiting').length;
       const finished = items.filter((i) => !['waiting', 'running'].includes(i.status)).length;
-      patch(head, JSON.stringify([!!q, q?.paused, items.length, waiting, !!running, finished]), () => [
+      const formatTime = (iso) => {
+        if (!iso) return '';
+        const d = new Date(iso);
+        return d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0');
+      };
+      patch(head, JSON.stringify([!!q, q?.paused, q?.pause_reason, q?.resume_at, items.length, waiting, !!running, finished]), () => [
         h('h2', null, 'Line-up'), items.length ? h('span', { class: 'count' }, items.length) : null,
         q ? h('span', { class: `queue-state muted sm ${q.paused ? 'warn-text' : ''}` },
-          q.paused ? (running ? 'Paused after the current video' : 'Paused') : running ? `Making 1, ${waiting} waiting` : waiting ? `${waiting} waiting` : items.length ? 'All done' : '') : null,
+          q.paused ? (
+            q.resume_at && q.pause_reason
+              ? `Paused until ${formatTime(q.resume_at)}: ${q.pause_reason}`
+              : q.resume_at
+              ? `Paused until ${formatTime(q.resume_at)}`
+              : running ? 'Paused after the current video' : 'Paused'
+          ) : running ? `Making 1, ${waiting} waiting` : waiting ? `${waiting} waiting` : items.length ? 'All done' : '') : null,
         h('div', { class: 'row gap push' },
           q && (items.length || q.paused) ? h('button', { type: 'button', class: 'btn ghost sm', onclick: () => setPaused(!q.paused) },
             icon(q.paused ? 'play' : 'pause'), q.paused ? 'Resume' : 'Pause') : null,

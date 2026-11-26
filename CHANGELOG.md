@@ -17,6 +17,14 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Wait out Claude usage limits in the batch queue (CC-003): when Claude
+  Code reports a usage or rate limit, the queue pauses automatically until
+  the reset time parsed from the CLI's message (or backs off from 15 minutes,
+  doubling up to 2 hours) and carries on with the remaining items without
+  failing them. The Queue page and `clipcut queue` show
+  "Paused until HH:MM: Claude usage limit". Single project runs show
+  "Claude usage limit: try again at HH:MM" without retrying automatically.
+
 - Shared asset cache for downloaded visuals: visual assets (YouTube cuts, GIFs,
   stock clips and images) are cached in `<home>/cache/assets/` keyed by provider
   and source URL (and segment timestamps for YouTube). When beats are re-run,

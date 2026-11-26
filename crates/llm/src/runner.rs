@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Local, TimeZone, Utc};
 use clipcut_core::Progress;
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -83,7 +84,14 @@ impl LlmError {
 impl fmt::Display for LlmError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.provider {
-            Some(p) => write!(f, "{p}: {}", self.message),
+            Some(p) => {
+                let name = p.name();
+                if self.message.starts_with(name) {
+                    f.write_str(&self.message)
+                } else {
+                    write!(f, "{p}: {}", self.message)
+                }
+            }
             None => f.write_str(&self.message),
         }
     }
@@ -285,23 +293,125 @@ pub fn classify(text: &str) -> LlmErrorKind {
     }
 }
 
+/// Parse a reset time from an agent CLI's rate/usage limit message when available.
+/// Supports unix timestamps (e.g. `|1759999999`), RFC3339 timestamps, and
+/// 12/24-hour times (e.g. `14:05`, `2:05 PM`).
+pub fn parse_reset_time(text: &str) -> Option<DateTime<Utc>> {
+    // 1. Check for pipe-delimited or keyword-preceded unix timestamp (e.g. `|1759999999`)
+    for part in text.split(|c: char| {
+        c == '|' || c == ':' || c == ' ' || c == ',' || c == ';' || c == '\n' || c == '\r'
+    }) {
+        let trimmed = part.trim();
+        if trimmed.len() == 10 && trimmed.chars().all(|c| c.is_ascii_digit()) {
+            if let Ok(ts) = trimmed.parse::<i64>() {
+                if (1_600_000_000..=4_000_000_000).contains(&ts) {
+                    return DateTime::from_timestamp(ts, 0);
+                }
+            }
+        }
+    }
+
+    // 2. Check for RFC3339 / ISO 8601 timestamp (e.g. 2026-11-23T14:05:00Z)
+    for word in text.split_whitespace() {
+        let clean = word.trim_matches(|c: char| {
+            !c.is_alphanumeric() && c != '-' && c != ':' && c != '+' && c != 'Z'
+        });
+        if clean.contains('T') {
+            if let Ok(dt) = DateTime::parse_from_rfc3339(clean) {
+                return Some(dt.with_timezone(&Utc));
+            }
+        }
+    }
+
+    // 3. Check for 12-hour or 24-hour time of day (e.g. "14:05", "2:05 PM", "2:05pm")
+    let lower = text.to_lowercase();
+    let bytes = lower.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b':'
+            && i > 0
+            && bytes[i - 1].is_ascii_digit()
+            && i + 2 < bytes.len()
+            && bytes[i + 1].is_ascii_digit()
+            && bytes[i + 2].is_ascii_digit()
+        {
+            let mut start = i - 1;
+            while start > 0 && bytes[start - 1].is_ascii_digit() {
+                start -= 1;
+            }
+            if i - start <= 2 {
+                let hour_str = &lower[start..i];
+                let min_str = &lower[i + 1..i + 3];
+                if let (Ok(mut hour), Ok(min)) =
+                    (hour_str.parse::<u32>(), min_str.parse::<u32>())
+                {
+                    if min < 60 {
+                        let mut rest = &lower[i + 3..];
+                        if rest.starts_with(':')
+                            && rest.len() >= 3
+                            && rest.as_bytes()[1].is_ascii_digit()
+                            && rest.as_bytes()[2].is_ascii_digit()
+                        {
+                            rest = &rest[3..];
+                        }
+                        let rest_trimmed = rest.trim_start();
+                        let is_pm = rest_trimmed.starts_with("pm");
+                        let is_am = rest_trimmed.starts_with("am");
+                        if is_pm {
+                            if hour < 12 {
+                                hour += 12;
+                            }
+                        } else if is_am && hour == 12 {
+                            hour = 0;
+                        }
+                        if hour < 24 {
+                            let now_local = Local::now();
+                            if let Some(target) = now_local.date_naive().and_hms_opt(hour, min, 0) {
+                                let target_dt = if target <= now_local.naive_local() {
+                                    (now_local.date_naive() + chrono::Duration::days(1))
+                                        .and_hms_opt(hour, min, 0)
+                                } else {
+                                    Some(target)
+                                };
+                                if let Some(target_dt) = target_dt {
+                                    if let Some(local_res) =
+                                        Local.from_local_datetime(&target_dt).single()
+                                    {
+                                        return Some(local_res.with_timezone(&Utc));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+
+    None
+}
+
 fn friendly(provider: Provider, kind: LlmErrorKind, detail: &str) -> String {
-    let detail = tail(detail, 400);
+    let detail_tail = tail(detail, 400);
     match (kind, provider) {
         (LlmErrorKind::Auth, Provider::Claude) => {
             format!(
-                "not signed in or the login expired. Run `claude` in a terminal and use /login. ({detail})"
+                "not signed in or the login expired. Run `claude` in a terminal and use /login. ({detail_tail})"
             )
         }
         (LlmErrorKind::Auth, Provider::Codex) => {
             format!(
-                "not signed in or the login expired. Run `codex login` in a terminal. ({detail})"
+                "not signed in or the login expired. Run `codex login` in a terminal. ({detail_tail})"
             )
         }
         (LlmErrorKind::RateLimit, _) => {
-            format!("rate limit or usage cap reached; try again later. ({detail})")
+            let reset = parse_reset_time(detail)
+                .unwrap_or_else(|| Utc::now() + chrono::Duration::minutes(15));
+            let time = reset.with_timezone(&Local).format("%H:%M");
+            format!("Claude usage limit: try again at {time}")
         }
-        _ => detail,
+        _ => detail_tail,
     }
 }
 
@@ -675,6 +785,7 @@ pub fn nudge(prompt: &str, reason: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Timelike;
     use serde_json::json;
 
     fn call(tooling: Tooling, model: &str, fast: bool) -> Call {
@@ -843,5 +954,31 @@ mod tests {
         assert_eq!(extract_json("noise {\"a\": \"}\"} tail"), None);
         assert_eq!(extract_json("{bad} then {\"ok\": 1}"), None);
         assert_eq!(extract_json("none"), None);
+    }
+
+    #[test]
+    fn parses_reset_time_from_sample_messages() {
+        // Unix timestamp
+        let ts = parse_reset_time("Claude AI usage limit reached|1759999999").unwrap();
+        assert_eq!(ts.timestamp(), 1759999999);
+
+        // ISO 8601
+        let iso = parse_reset_time("Usage limit hit: resets at 2026-11-23T14:05:00Z").unwrap();
+        assert_eq!(iso.timestamp(), 1795442700);
+
+        // 24-hour time of day
+        let t24 = parse_reset_time("Your limit will reset at 14:05.").unwrap();
+        let local_t24 = t24.with_timezone(&Local);
+        assert_eq!(local_t24.hour(), 14);
+        assert_eq!(local_t24.minute(), 5);
+
+        // 12-hour AM/PM
+        let t12 = parse_reset_time("Rate limit reached. Try again at 2:05 PM.").unwrap();
+        let local_t12 = t12.with_timezone(&Local);
+        assert_eq!(local_t12.hour(), 14);
+        assert_eq!(local_t12.minute(), 5);
+
+        // None on unrelated errors
+        assert!(parse_reset_time("syntax error in input file").is_none());
     }
 }

@@ -189,6 +189,12 @@ new line.
 - Videos are made one at a time, in order. A failure is recorded on that
   item and the queue moves on.
 - **Pause** stops new videos from starting; the current one finishes.
+- If Claude Code reports a usage or rate limit, the queue pauses
+  automatically until the limit resets (or backs off from 15 minutes,
+  doubling up to 2 hours) and carries on once the limit resets, without
+  failing the remaining items. Both the Queue page and `clipcut queue` show
+  the pause reason and resume time (e.g. `Paused until 14:05: Claude usage limit`).
+  Resuming by hand works as before.
 - **Stop** (✕ on a running item) cancels it. **Retry** on a failed or
   cancelled item puts it back in line and picks up from the stage that
   stopped, so finished work is not redone.
