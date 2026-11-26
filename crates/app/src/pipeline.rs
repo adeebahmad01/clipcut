@@ -182,6 +182,7 @@ fn mark_interrupted(p: &mut Project, reason: &str) {
     for s in p.stages.iter_mut().filter(|s| s.status == Status::Running) {
         s.status = Status::Failed;
         s.error = Some(reason.to_string());
+        s.error_kind = None;
         s.finished_at = Some(Utc::now());
     }
     for b in p
@@ -261,6 +262,7 @@ async fn run_stages(state: &AppState, id: &str, stages: &[Stage]) -> anyhow::Res
                 s.started_at = Some(Utc::now());
                 s.finished_at = None;
                 s.error = None;
+                s.error_kind = None;
                 s.progress = 0.0;
                 s.message = format!("{}…", stage.label());
                 Ok(())
@@ -270,6 +272,37 @@ async fn run_stages(state: &AppState, id: &str, stages: &[Stage]) -> anyhow::Res
 
         let result = run_stage(state, id, stage, &progress).await;
         let failed = result.as_ref().err().map(|e| format!("{e:#}"));
+        let error_kind = result.as_ref().err().and_then(|err| {
+            for cause in err.chain() {
+                if let Some(llm_err) = cause.downcast_ref::<clipcut_llm::LlmError>() {
+                    return match llm_err.kind {
+                        clipcut_llm::LlmErrorKind::RateLimit => {
+                            Some(clipcut_core::model::StageErrorKind::RateLimit)
+                        }
+                        clipcut_llm::LlmErrorKind::Auth => {
+                            Some(clipcut_core::model::StageErrorKind::Auth)
+                        }
+                        clipcut_llm::LlmErrorKind::Timeout => {
+                            Some(clipcut_core::model::StageErrorKind::Timeout)
+                        }
+                        _ => Some(clipcut_core::model::StageErrorKind::Failed),
+                    };
+                }
+            }
+            let text = format!("{err:#}");
+            match clipcut_llm::classify(&text) {
+                clipcut_llm::LlmErrorKind::RateLimit => {
+                    Some(clipcut_core::model::StageErrorKind::RateLimit)
+                }
+                clipcut_llm::LlmErrorKind::Auth => {
+                    Some(clipcut_core::model::StageErrorKind::Auth)
+                }
+                clipcut_llm::LlmErrorKind::Timeout => {
+                    Some(clipcut_core::model::StageErrorKind::Timeout)
+                }
+                _ => None,
+            }
+        });
         let (project, _) = state
             .store
             .update(id, |p| {
@@ -280,10 +313,13 @@ async fn run_stages(state: &AppState, id: &str, stages: &[Stage]) -> anyhow::Res
                         s.status = Status::Done;
                         s.progress = 1.0;
                         s.message = "Done".into();
+                        s.error = None;
+                        s.error_kind = None;
                     }
                     Some(e) => {
                         s.status = Status::Failed;
                         s.error = Some(e.clone());
+                        s.error_kind = error_kind;
                         s.message = "Failed".into();
                     }
                 }

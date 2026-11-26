@@ -102,6 +102,12 @@ pub struct QueueState {
     pub items: Vec<QueueItem>,
     #[serde(default)]
     pub paused: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backoff_minutes: Option<u32>,
 }
 
 /// `POST /api/queue`: explicit items, or plain topics sharing one set of options.
@@ -269,7 +275,56 @@ impl Queue {
     }
 
     pub fn set_paused(&self, paused: bool) -> anyhow::Result<()> {
-        self.change(|s| s.paused = paused)
+        self.change(|s| {
+            s.paused = paused;
+            if !paused {
+                s.pause_reason = None;
+                s.resume_at = None;
+                s.backoff_minutes = None;
+            }
+        })
+    }
+
+    pub fn pause_for_limit(
+        &self,
+        resume_at: DateTime<Utc>,
+        reason: impl Into<String>,
+        backoff_minutes: u32,
+    ) -> anyhow::Result<()> {
+        self.change(|s| {
+            s.paused = true;
+            s.pause_reason = Some(reason.into());
+            s.resume_at = Some(resume_at);
+            s.backoff_minutes = Some(backoff_minutes);
+        })
+    }
+
+    pub fn requeue_for_limit(&self, id: &str) -> anyhow::Result<bool> {
+        self.change(|s| {
+            let Some(item) = s.items.iter_mut().find(|i| i.id == id) else {
+                return false;
+            };
+            if item.status != ItemStatus::Cancelled {
+                item.status = ItemStatus::Waiting;
+                item.error = None;
+                item.started_at = None;
+                item.finished_at = None;
+            }
+            true
+        })
+    }
+
+    pub fn auto_resume(&self) -> anyhow::Result<bool> {
+        self.change(|s| {
+            if s.paused && s.resume_at.is_some() {
+                s.paused = false;
+                s.pause_reason = None;
+                s.resume_at = None;
+                true
+            } else {
+                false
+            }
+        })
     }
 
     /// Put a failed or cancelled item back in line. It keeps its project, so
@@ -301,9 +356,30 @@ impl Queue {
 
     /// Next waiting item, marked running. None while paused.
     fn take_next(&self) -> anyhow::Result<Option<QueueItem>> {
+        {
+            let s = self.state.lock().unwrap();
+            if s.paused {
+                if let Some(at) = s.resume_at {
+                    if Utc::now() < at {
+                        return Ok(None);
+                    }
+                } else {
+                    return Ok(None);
+                }
+            }
+            if !s.items.iter().any(|i| i.status == ItemStatus::Waiting) {
+                return Ok(None);
+            }
+        }
         self.change(|s| {
             if s.paused {
-                return None;
+                if s.resume_at.is_some_and(|at| Utc::now() >= at) {
+                    s.paused = false;
+                    s.pause_reason = None;
+                    s.resume_at = None;
+                } else {
+                    return None;
+                }
             }
             let item = s
                 .items
@@ -327,19 +403,24 @@ impl Queue {
 
     /// Record how a run ended. A cancellation made meanwhile wins.
     fn finish(&self, id: &str, result: anyhow::Result<Option<String>>) -> anyhow::Result<()> {
-        self.update_item(id, |item| {
-            if item.status == ItemStatus::Cancelled {
-                return;
+        self.change(|s| {
+            if result.is_ok() {
+                s.backoff_minutes = None;
             }
-            item.finished_at = Some(Utc::now());
-            match result {
-                Ok(url) => {
-                    item.status = ItemStatus::Done;
-                    item.video_url = url;
+            if let Some(item) = s.items.iter_mut().find(|i| i.id == id) {
+                if item.status == ItemStatus::Cancelled {
+                    return;
                 }
-                Err(e) => {
-                    item.status = ItemStatus::Failed;
-                    item.error = Some(format!("{e:#}"));
+                item.finished_at = Some(Utc::now());
+                match result {
+                    Ok(url) => {
+                        item.status = ItemStatus::Done;
+                        item.video_url = url;
+                    }
+                    Err(e) => {
+                        item.status = ItemStatus::Failed;
+                        item.error = Some(format!("{e:#}"));
+                    }
                 }
             }
         })
@@ -347,11 +428,12 @@ impl Queue {
 
     pub fn is_idle(&self) -> bool {
         let s = self.state.lock().unwrap();
-        s.paused
-            || !s
-                .items
-                .iter()
-                .any(|i| matches!(i.status, ItemStatus::Waiting | ItemStatus::Running))
+        if s.paused && s.resume_at.is_none() {
+            return true;
+        }
+        !s.items
+            .iter()
+            .any(|i| matches!(i.status, ItemStatus::Waiting | ItemStatus::Running))
     }
 }
 
@@ -483,9 +565,38 @@ pub async fn remove(state: &AppState, id: &str) -> anyhow::Result<bool> {
     Ok(true)
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum QueueRunError {
+    #[error("Claude usage limit: {message}")]
+    Limit {
+        stage: clipcut_core::Stage,
+        message: String,
+        resume_at: Option<DateTime<Utc>>,
+    },
+}
+
 /// Drain the queue one item at a time. With `until_idle` (the CLI) it returns
 /// once nothing is waiting; the server's worker runs forever.
 pub async fn worker(state: AppState, until_idle: bool) {
+    worker_with(state, until_idle, |s, item| {
+        let s = s.clone();
+        let item = item.clone();
+        Box::pin(async move { run_item(&s, &item).await })
+    })
+    .await;
+}
+
+pub async fn worker_with<F>(state: AppState, until_idle: bool, runner: F)
+where
+    F: Fn(
+            &AppState,
+            &QueueItem,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = anyhow::Result<Option<String>>> + Send>,
+        > + Send
+        + Sync
+        + 'static,
+{
     loop {
         let item = match state.queue.take_next() {
             Ok(item) => item,
@@ -498,16 +609,35 @@ pub async fn worker(state: AppState, until_idle: bool) {
             if until_idle && state.queue.is_idle() {
                 return;
             }
+            let (has_resume, sleep_duration) = {
+                let s = state.queue.snapshot();
+                match s.resume_at {
+                    Some(at) => {
+                        let now = Utc::now();
+                        let dur = if at > now {
+                            (at - now).to_std().unwrap_or(Duration::from_millis(100))
+                        } else {
+                            Duration::ZERO
+                        };
+                        (true, dur)
+                    }
+                    None => (false, Duration::from_secs(5)),
+                }
+            };
             tokio::select! {
                 _ = state.queue.wake.notified() => {}
-                _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                _ = tokio::time::sleep(sleep_duration) => {
+                    if has_resume {
+                        let _ = state.queue.auto_resume();
+                    }
+                }
             }
             continue;
         };
         tracing::info!(item = %item.id, "queue: making \"{}\"", item.topic);
         let task_state = state.clone();
         let task_item = item.clone();
-        let task = tokio::spawn(async move { run_item(&task_state, &task_item).await });
+        let task = tokio::spawn(runner(&task_state, &task_item));
         *state.queue.current.lock().unwrap() = Some((item.id.clone(), task.abort_handle()));
         let result = match task.await {
             Ok(result) => result,
@@ -520,6 +650,42 @@ pub async fn worker(state: AppState, until_idle: bool) {
                 *current = None;
             }
         }
+
+        let limit_info = result.as_ref().err().and_then(|err| {
+            if let Some(QueueRunError::Limit {
+                message, resume_at, ..
+            }) = err.downcast_ref::<QueueRunError>()
+            {
+                return Some((message.clone(), *resume_at));
+            }
+            let text = format!("{err:#}");
+            if clipcut_llm::classify(&text) == clipcut_llm::LlmErrorKind::RateLimit {
+                let at = clipcut_llm::parse_reset_time(&text);
+                return Some((text, at));
+            }
+            None
+        });
+
+        if let Some((err_msg, parsed_at)) = limit_info {
+            tracing::warn!(item = %item.id, "queue: hit limit ({err_msg}), pausing queue");
+            let _ = state.queue.requeue_for_limit(&item.id);
+            let (resume_at, wait_mins) = match parsed_at {
+                Some(at) => (at, 15),
+                None => {
+                    let prev = state.queue.snapshot().backoff_minutes;
+                    let mins = match prev {
+                        None => 15,
+                        Some(m) => (m * 2).min(120),
+                    };
+                    (Utc::now() + chrono::Duration::minutes(mins as i64), mins)
+                }
+            };
+            if let Err(e) = state.queue.pause_for_limit(resume_at, "Claude usage limit", wait_mins) {
+                tracing::error!("queue pause_for_limit: {e:#}");
+            }
+            continue;
+        }
+
         if let Err(e) = &result {
             tracing::warn!(item = %item.id, "queue: {e:#}");
         }
@@ -563,10 +729,21 @@ async fn run_item(state: &AppState, item: &QueueItem) -> anyhow::Result<Option<S
     }
     let project = state.store.get(&id)?;
     if let Some(s) = project.stages.iter().find(|s| s.status == Status::Failed) {
+        let err_msg = s.error.clone().unwrap_or_else(|| "unknown error".into());
+        if s.error_kind == Some(clipcut_core::model::StageErrorKind::RateLimit)
+            || clipcut_llm::classify(&err_msg) == clipcut_llm::LlmErrorKind::RateLimit
+        {
+            let resume_at = clipcut_llm::parse_reset_time(&err_msg);
+            return Err(QueueRunError::Limit {
+                stage: s.stage,
+                message: err_msg,
+                resume_at,
+            }
+            .into());
+        }
         anyhow::bail!(
-            "{} failed: {}",
-            s.stage.label(),
-            s.error.as_deref().unwrap_or("unknown error")
+            "{} failed: {err_msg}",
+            s.stage.label()
         );
     }
     anyhow::ensure!(project.render.is_some(), "the pipeline stopped before rendering");
@@ -726,5 +903,183 @@ mod tests {
         assert_eq!(privacy(&b.items[0].options).as_deref(), Some("public"));
         assert_eq!(privacy(&b.items[1].options).as_deref(), Some("unlisted"));
         assert_eq!(privacy(&b.items[2].options), None, "no plan stays no plan");
+    }
+
+    #[tokio::test]
+    async fn five_items_with_second_hitting_limit_all_succeed_after_wait() {
+        tokio::time::pause();
+        let home = TestHome::new();
+        let state = home.state();
+
+        let added = state
+            .queue
+            .add(body(&["one", "two", "three", "four", "five"]))
+            .unwrap();
+        assert_eq!(added.len(), 5);
+
+        let second_attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts = second_attempts.clone();
+
+        let worker_state = state.clone();
+        let worker_handle = tokio::spawn(async move {
+            worker_with(worker_state, true, move |_s, item| {
+                let item_topic = item.topic.clone();
+                let att = attempts.clone();
+                Box::pin(async move {
+                    if item_topic == "two" {
+                        let prev = att.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        if prev == 0 {
+                            return Err(QueueRunError::Limit {
+                                stage: clipcut_core::Stage::Research,
+                                message: "Claude usage limit reached".into(),
+                                resume_at: None,
+                            }
+                            .into());
+                        }
+                    }
+                    Ok(Some(format!("https://youtu.be/{item_topic}")))
+                })
+            })
+            .await;
+        });
+
+        // Yield to allow worker to run item 1 and hit limit on item 2
+        while !state.queue.snapshot().paused {
+            tokio::task::yield_now().await;
+        }
+
+        let snap = state.queue.snapshot();
+        assert!(snap.paused);
+        assert_eq!(snap.pause_reason.as_deref(), Some("Claude usage limit"));
+        assert!(snap.resume_at.is_some());
+        assert_eq!(snap.backoff_minutes, Some(15));
+        // Item 2 was put back in line (Waiting), not Failed!
+        assert_eq!(snap.items[1].status, ItemStatus::Waiting);
+        assert_eq!(snap.items[1].error, None);
+
+        // Advance past the 15-minute wait
+        tokio::time::advance(Duration::from_secs(16 * 60)).await;
+
+        worker_handle.await.unwrap();
+
+        let final_snap = state.queue.snapshot();
+        assert_eq!(final_snap.items.len(), 5);
+        for item in &final_snap.items {
+            assert_eq!(item.status, ItemStatus::Done);
+            assert!(item.error.is_none());
+            assert!(item.video_url.is_some());
+        }
+        assert!(!final_snap.paused);
+    }
+
+    #[tokio::test]
+    async fn consecutive_limits_double_backoff_up_to_two_hours() {
+        tokio::time::pause();
+        let home = TestHome::new();
+        let state = home.state();
+
+        state.queue.add(body(&["topic1"])).unwrap();
+        let fail_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let fails = fail_count.clone();
+
+        let worker_state = state.clone();
+        let worker_handle = tokio::spawn(async move {
+            worker_with(worker_state, true, move |_s, _item| {
+                let count = fails.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async move {
+                    if count < 5 {
+                        return Err(QueueRunError::Limit {
+                            stage: clipcut_core::Stage::Research,
+                            message: "rate limit".into(),
+                            resume_at: None,
+                        }
+                        .into());
+                    }
+                    Ok(None)
+                })
+            })
+            .await;
+        });
+
+        // 1st failure: 15m
+        while state.queue.snapshot().backoff_minutes != Some(15) {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(state.queue.snapshot().backoff_minutes, Some(15));
+        tokio::time::advance(Duration::from_secs(16 * 60)).await;
+
+        // 2nd failure: 30m
+        while state.queue.snapshot().backoff_minutes != Some(30) {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(state.queue.snapshot().backoff_minutes, Some(30));
+        tokio::time::advance(Duration::from_secs(31 * 60)).await;
+
+        // 3rd failure: 60m
+        while state.queue.snapshot().backoff_minutes != Some(60) {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(state.queue.snapshot().backoff_minutes, Some(60));
+        tokio::time::advance(Duration::from_secs(61 * 60)).await;
+
+        // 4th failure: 120m (capped at 2 hours)
+        while state.queue.snapshot().backoff_minutes != Some(120) {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(state.queue.snapshot().backoff_minutes, Some(120));
+        tokio::time::advance(Duration::from_secs(121 * 60)).await;
+
+        // 5th failure: still 120m
+        while fail_count.load(std::sync::atomic::Ordering::SeqCst) < 5 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(state.queue.snapshot().backoff_minutes, Some(120));
+        tokio::time::advance(Duration::from_secs(121 * 60)).await;
+
+        worker_handle.await.unwrap();
+        assert_eq!(state.queue.snapshot().items[0].status, ItemStatus::Done);
+    }
+
+    #[tokio::test]
+    async fn limit_with_parsed_reset_time_uses_that_time() {
+        tokio::time::pause();
+        let home = TestHome::new();
+        let state = home.state();
+
+        state.queue.add(body(&["topic1"])).unwrap();
+        let attempted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let att = attempted.clone();
+
+        let target_time = Utc::now() + chrono::Duration::minutes(42);
+
+        let worker_state = state.clone();
+        let worker_handle = tokio::spawn(async move {
+            worker_with(worker_state, true, move |_s, _item| {
+                let was_attempted = att.swap(true, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async move {
+                    if !was_attempted {
+                        return Err(QueueRunError::Limit {
+                            stage: clipcut_core::Stage::Hooks,
+                            message: "Your limit will reset at ...".into(),
+                            resume_at: Some(target_time),
+                        }
+                        .into());
+                    }
+                    Ok(None)
+                })
+            })
+            .await;
+        });
+
+        while !state.queue.snapshot().paused {
+            tokio::task::yield_now().await;
+        }
+        let s = state.queue.snapshot();
+        assert!(s.paused);
+        assert_eq!(s.resume_at, Some(target_time));
+
+        tokio::time::advance(Duration::from_secs(43 * 60)).await;
+        worker_handle.await.unwrap();
+        assert_eq!(state.queue.snapshot().items[0].status, ItemStatus::Done);
     }
 }

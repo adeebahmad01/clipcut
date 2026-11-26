@@ -151,6 +151,15 @@ pub enum Status {
     Skipped,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StageErrorKind {
+    RateLimit,
+    Auth,
+    Timeout,
+    Failed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StageState {
     pub stage: Stage,
@@ -162,6 +171,8 @@ pub struct StageState {
     pub progress: f32,
     #[serde(default)]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<StageErrorKind>,
     #[serde(default)]
     pub started_at: Option<DateTime<Utc>>,
     #[serde(default)]
@@ -493,6 +504,7 @@ impl Project {
                     message: String::new(),
                     progress: 0.0,
                     error: None,
+                    error_kind: None,
                     started_at: None,
                     finished_at: None,
                 })
@@ -533,6 +545,7 @@ impl Project {
             message: String::new(),
             progress: 0.0,
             error: None,
+            error_kind: None,
             started_at: None,
             finished_at: None,
         });

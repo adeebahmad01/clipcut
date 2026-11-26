@@ -55,6 +55,15 @@ Your Claude Code is too old. Run `claude update`.
 **Stages fail with "not logged in" or an auth error.**
 Run `claude` in a terminal and sign in again.
 
+**Stages fail with "Claude usage limit" or a rate limit.**
+When Claude Code reaches its usage cap or rate limit:
+- In the batch queue, the queue pauses automatically until the reset time
+  (or with backoff from 15 minutes, doubling up to 2 hours), and then carries
+  on with the batch.
+- For a single project run, the project page and CLI display the limit
+  error with a "Try again at HH:MM" hint and do not retry automatically.
+  Wait until the reset time and re-run the stage.
+
 **A stage times out.**
 Raise `llm.timeout_seconds` (up to 1800), or use a faster model in
 `llm.model`.

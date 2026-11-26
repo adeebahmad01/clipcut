@@ -24,7 +24,7 @@ use serde_json::Value;
 
 pub use beats::BeatRepair;
 use runner::{Call, Rejection, Tooling};
-pub use runner::{LlmError, LlmErrorKind, Provider};
+pub use runner::{classify, parse_reset_time, LlmError, LlmErrorKind, Provider};
 use text::{
     clean_narration, normalize_ws, split_sentences, strip_citations, truncate_chars,
     truncate_words, word_count,
